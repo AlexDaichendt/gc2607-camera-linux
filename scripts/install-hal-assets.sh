@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-    echo "Usage: $0 HAL_REPO PRIVATE_ASSET_DIR" >&2
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+    echo "Usage: $0 HAL_REPO [ASSET_DIR]" >&2
     exit 2
 fi
 
 HAL_REPO="$1"
-ASSET_DIR="$2"
+ASSET_DIR="${2:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/assets/hal}"
 
 if [[ ! -d "$HAL_REPO/config/linux/ipu6epmtl" ]]; then
     echo "Not an expected IPU6 HAL repo: $HAL_REPO" >&2
@@ -21,7 +21,7 @@ required=(
 
 for file in "${required[@]}"; do
     if [[ ! -f "$ASSET_DIR/$file" ]]; then
-        echo "Missing private asset: $ASSET_DIR/$file" >&2
+        echo "Missing HAL asset: $ASSET_DIR/$file" >&2
         exit 1
     fi
 done
@@ -40,7 +40,7 @@ if [[ -f "$ASSET_DIR/graph_descriptor.xml" ]]; then
         "$HAL_REPO/config/linux/ipu6epmtl/gcss/graph_descriptor.xml"
 fi
 
-echo "Installed GC2607 private HAL assets into $HAL_REPO"
+echo "Installed GC2607 HAL assets into $HAL_REPO"
 sha256sum \
     "$HAL_REPO/config/linux/ipu6epmtl/gc2607_gc2607_MTL.aiqb" \
     "$HAL_REPO/config/linux/ipu6epmtl/gcss/graph_settings_gc2607_gc2607_MTL.xml" \

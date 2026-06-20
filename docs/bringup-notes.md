@@ -3,6 +3,9 @@
 Date: 2026-06-20
 Host: `alex@10.0.0.114`
 
+This is the historical bring-up log. Path variables such as `$WORKDIR`, `$BRINGUP`, `$DRIVER`,
+`$HAL`, and `$IPU6_DRIVERS` refer to the clone-based workflow in the top-level `README.md`.
+
 ## Goal
 
 Get the GC2607 laptop camera working with the highest practical image quality on Linux.
@@ -29,13 +32,13 @@ This now produces coherent `NV12 1920x1080` frames through `icamerasrc`.
 Driver repo:
 
 ```sh
-~/repos/gc2607-v4l2-driver
+$DRIVER
 ```
 
 HAL repo:
 
 ```sh
-~/repos/ipu6-camera-hal-gc2607
+$HAL
 ```
 
 Installed test prefix:
@@ -102,7 +105,7 @@ The AIQB/graph path uses the intended ISP tuning. That is the right path for ima
 Repo:
 
 ```sh
-~/repos/gc2607-v4l2-driver
+$DRIVER
 ```
 
 Important source files changed:
@@ -173,7 +176,7 @@ that raw Bayer without the proper ISP/AIQ pipeline is not a good final output.
 Repo:
 
 ```sh
-~/repos/ipu6-camera-hal-gc2607
+$HAL
 ```
 
 GC2607 files added under `config/linux/ipu6epmtl`:
@@ -284,7 +287,7 @@ Changing the usage fixed the tearing.
 HAL build/install:
 
 ```sh
-cd ~/repos/ipu6-camera-hal-gc2607
+cd $HAL
 cmake --build build-gc2607 -j"$(nproc)"
 cmake --install build-gc2607 --prefix "$HOME/opt/gc2607-ipu6"
 ```
@@ -451,7 +454,7 @@ sudo fuser -v /dev/video* /dev/v4l-subdev* /dev/media*
 If the sensor driver must be reloaded:
 
 ```sh
-cd ~/repos/gc2607-v4l2-driver
+cd $DRIVER
 echo i2c-GCTI2607:00 | sudo tee /sys/bus/i2c/drivers/gc2607/unbind
 sudo rmmod gc2607
 sudo insmod ./gc2607.ko
