@@ -1,0 +1,261 @@
+diff --git a/Makefile b/Makefile
+index 9eabbfc..1489c50 100644
+--- a/Makefile
++++ b/Makefile
+@@ -12,18 +12,21 @@ KDIR ?= /lib/modules/$(shell uname -r)/build
+ # Build directory
+ PWD := $(shell pwd)
+ 
++# Auto-detect kernels built with LLVM/Clang (e.g. CachyOS)
++KBUILD_COMPILER := $(shell grep -q '^CONFIG_CC_IS_CLANG=y' $(KDIR)/.config 2>/dev/null && echo LLVM=1)
++
+ # Default target: build the module
+ all:
+-	$(MAKE) -C $(KDIR) M=$(PWD) modules
++	$(MAKE) $(KBUILD_COMPILER) -C $(KDIR) M=$(PWD) modules
+ 
+ # Install module to system
+ install: all
+-	$(MAKE) -C $(KDIR) M=$(PWD) modules_install
++	$(MAKE) $(KBUILD_COMPILER) -C $(KDIR) M=$(PWD) modules_install
+ 	depmod -a
+ 
+ # Clean build artifacts
+ clean:
+-	$(MAKE) -C $(KDIR) M=$(PWD) clean
++	$(MAKE) $(KBUILD_COMPILER) -C $(KDIR) M=$(PWD) clean
+ 	rm -f Module.symvers modules.order
+ 
+ # Help target
+diff --git a/gc2607.c b/gc2607.c
+index 8d091ce..9ead1c3 100644
+--- a/gc2607.c
++++ b/gc2607.c
+@@ -32,6 +32,8 @@
+ /* Exposure and gain registers */
+ #define GC2607_REG_EXPOSURE_H		0x0202
+ #define GC2607_REG_EXPOSURE_L		0x0203
++#define GC2607_REG_VTS_H		0x0220
++#define GC2607_REG_VTS_L		0x0221
+ #define GC2607_REG_AGAIN_H		0x02b3
+ #define GC2607_REG_AGAIN_L		0x02b4
+ #define GC2607_REG_DGAIN_H		0x020c
+@@ -39,23 +41,31 @@
+ 
+ /* Exposure and gain limits */
+ #define GC2607_EXPOSURE_MIN		4
+-#define GC2607_EXPOSURE_MAX		2002	/* VTS - 1 (must be < VTS) */
++#define GC2607_EXPOSURE_MAX_MARGIN	4
++#define GC2607_EXPOSURE_MAX		(GC2607_VTS - GC2607_EXPOSURE_MAX_MARGIN)
+ #define GC2607_EXPOSURE_STEP		1
+-#define GC2607_EXPOSURE_DEFAULT		2002	/* Tested optimal for indoor use */
++#define GC2607_EXPOSURE_DEFAULT		0x0438
+ 
+-/* Gain is controlled via LUT index (0-16), not raw register values */
+-#define GC2607_GAIN_MIN			0	/* LUT index 0 = 1.0x gain */
+-#define GC2607_GAIN_MAX			16	/* LUT index 16 = 15.8x gain */
+-#define GC2607_GAIN_STEP		1	/* One LUT entry at a time */
+-#define GC2607_GAIN_DEFAULT		14	/* LUT index 14 = ~10x gain */
+-
+-/* Sensor timing - modified for better low-light performance */
+-#define GC2607_PIXEL_RATE		(672000000LL / 10 * 2)  /* 134.4 MHz */
++/*
++ * Intel IPU6 HAL and the local test scripts use a 64-based analogue gain
++ * scale. Map that public ABI onto the sensor's 17-entry register LUT.
++ */
++#define GC2607_GAIN_MIN			64	/* 1.0x */
++#define GC2607_GAIN_MAX			255	/* maps to LUT index 16 */
++#define GC2607_GAIN_STEP		1
++#define GC2607_GAIN_DEFAULT		GC2607_GAIN_MIN
++#define GC2607_DGAIN_MIN		0
++#define GC2607_DGAIN_MAX		4095
++#define GC2607_DGAIN_DEFAULT		0
++
++/* Sensor timing for the current 1920x1080 MIPI mode */
++#define GC2607_PIXEL_RATE		(2048LL * 1335 * 30)
+ #define GC2607_LINK_FREQ		336000000LL  /* 672 Mbps / 2 lanes */
+ #define GC2607_HTS			2048
+-#define GC2607_VTS			2003  /* 1.5x from 1335 for 1.5x exposure (20 FPS) */
++#define GC2607_VTS			0x0537
+ #define GC2607_WIDTH			1920
+ #define GC2607_HEIGHT			1080
++#define GC2607_VTS_MAX			0xffff
+ 
+ /* Register value pair for initialization sequences */
+ struct gc2607_regval {
+@@ -97,6 +107,18 @@ static const struct gc2607_gain_lut gc2607_gain_table[] = {
+ 
+ #define GC2607_GAIN_TABLE_SIZE ARRAY_SIZE(gc2607_gain_table)
+ 
++static unsigned int gc2607_gain_to_lut_index(int gain)
++{
++	if (gain <= GC2607_GAIN_MIN)
++		return 0;
++
++	if (gain >= GC2607_GAIN_MAX)
++		return GC2607_GAIN_TABLE_SIZE - 1;
++
++	return (gain - GC2607_GAIN_MIN) * (GC2607_GAIN_TABLE_SIZE - 1) /
++	       (GC2607_GAIN_MAX - GC2607_GAIN_MIN);
++}
++
+ /* Sensor mode structure */
+ struct gc2607_mode {
+ 	u32 width;
+@@ -117,7 +139,10 @@ struct gc2607 {
+ 	struct v4l2_ctrl *link_freq;
+ 	struct v4l2_ctrl *pixel_rate;
+ 	struct v4l2_ctrl *exposure;
++	struct v4l2_ctrl *hblank;
++	struct v4l2_ctrl *vblank;
+ 	struct v4l2_ctrl *gain;
++	struct v4l2_ctrl *digital_gain;
+ 
+ 	/* Power management resources (provided by INT3472 PMIC) */
+ 	struct clk *xclk;		/* Master clock (typically 19.2 MHz) */
+@@ -251,8 +276,8 @@ static const struct gc2607_regval gc2607_1080p_30fps_regs[] = {
+ 	{0x0341, 0x6e},
+ 	{0x0342, 0x08},  /* HTS high byte */
+ 	{0x0343, 0x00},  /* HTS low byte = 2048 */
+-	{0x0220, 0x07},  /* VTS high byte (2003 = 0x07d3 for 20 FPS) */
+-	{0x0221, 0xd3},  /* VTS low byte */
++	{0x0220, 0x05},  /* VTS high byte */
++	{0x0221, 0x37},  /* VTS low byte = 1335 */
+ 	{0x0af4, 0x2b},
+ 	{0x0002, 0x30},
+ 	{0x00c3, 0x3c},
+@@ -620,6 +645,18 @@ static int gc2607_s_ctrl(struct v4l2_ctrl *ctrl)
+ 	struct i2c_client *client = gc2607->client;
+ 	int ret = 0;
+ 
++	if (ctrl->id == V4L2_CID_VBLANK && gc2607->exposure) {
++		u32 exposure_max = gc2607->cur_mode->height + ctrl->val -
++				   GC2607_EXPOSURE_MAX_MARGIN;
++		u32 exposure_def = GC2607_EXPOSURE_DEFAULT;
++
++		if (exposure_def > exposure_max)
++			exposure_def = exposure_max;
++		__v4l2_ctrl_modify_range(gc2607->exposure, GC2607_EXPOSURE_MIN,
++					  exposure_max, GC2607_EXPOSURE_STEP,
++					  exposure_def);
++	}
++
+ 	/* Only apply controls when streaming */
+ 	if (!pm_runtime_get_if_in_use(&client->dev))
+ 		return 0;
+@@ -638,18 +675,9 @@ static int gc2607_s_ctrl(struct v4l2_ctrl *ctrl)
+ 		break;
+ 
+ 	case V4L2_CID_ANALOGUE_GAIN:
+-		/* Always use the calibrated LUT for optimal noise performance.
+-		 * ctrl->val is LUT index (0-16), not raw register value.
+-		 */
+-		if (ctrl->val < 0 || ctrl->val >= GC2607_GAIN_TABLE_SIZE) {
+-			dev_err(&client->dev, "Invalid gain LUT index %d\n", ctrl->val);
+-			ret = -EINVAL;
+-			break;
+-		}
+-
+-		/* Get calibrated register values from LUT */
+ 		{
+-			const struct gc2607_gain_lut *lut = &gc2607_gain_table[ctrl->val];
++			unsigned int index = gc2607_gain_to_lut_index(ctrl->val);
++			const struct gc2607_gain_lut *lut = &gc2607_gain_table[index];
+ 
+ 			/* Write all 4 gain registers for proper calibration */
+ 			ret = gc2607_write_reg(gc2607, GC2607_REG_AGAIN_H, lut->reg2b3);
+@@ -658,10 +686,31 @@ static int gc2607_s_ctrl(struct v4l2_ctrl *ctrl)
+ 			if (!ret) ret = gc2607_write_reg(gc2607, GC2607_REG_DGAIN_L, lut->reg20d);
+ 
+ 			if (!ret)
+-				dev_dbg(&client->dev, "Set gain to LUT index %d\n", ctrl->val);
++				dev_dbg(&client->dev, "Set gain %d to LUT index %u\n",
++					ctrl->val, index);
+ 		}
+ 		break;
+ 
++	case V4L2_CID_DIGITAL_GAIN:
++		/*
++		 * The reference driver exposes digital gain allocation as a
++		 * no-op. Accept the HAL control so ISP-managed digital gain does
++		 * not fail the sensor update sequence.
++		 */
++		break;
++
++	case V4L2_CID_VBLANK:
++	{
++		u32 vts = gc2607->cur_mode->height + ctrl->val;
++
++		ret = gc2607_write_reg(gc2607, GC2607_REG_VTS_H,
++				       (vts >> 8) & 0xff);
++		if (!ret)
++			ret = gc2607_write_reg(gc2607, GC2607_REG_VTS_L,
++					       vts & 0xff);
++		break;
++	}
++
+ 	default:
+ 		ret = -EINVAL;
+ 		break;
+@@ -843,8 +892,11 @@ static int gc2607_probe(struct i2c_client *client)
+ 		return ret;
+ 	}
+ 
++	/* Controls depend on the active mode's timing. */
++	gc2607->cur_mode = &gc2607_modes[0];
++
+ 	/* Initialize control handler with V4L2 controls */
+-	v4l2_ctrl_handler_init(&gc2607->ctrls, 4);
++	v4l2_ctrl_handler_init(&gc2607->ctrls, 7);
+ 
+ 	/* Link frequency control (required by IPU6) */
+ 	gc2607->link_freq = v4l2_ctrl_new_int_menu(&gc2607->ctrls,
+@@ -867,6 +919,25 @@ static int gc2607_probe(struct i2c_client *client)
+ 	if (gc2607->pixel_rate)
+ 		gc2607->pixel_rate->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+ 
++	/* Timing controls used by Intel IPU6 HAL to derive LLP/FLL. */
++	gc2607->hblank = v4l2_ctrl_new_std(&gc2607->ctrls,
++					    NULL,
++					    V4L2_CID_HBLANK,
++					    gc2607->cur_mode->hts - gc2607->cur_mode->width,
++					    gc2607->cur_mode->hts - gc2607->cur_mode->width,
++					    1,
++					    gc2607->cur_mode->hts - gc2607->cur_mode->width);
++	if (gc2607->hblank)
++		gc2607->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	gc2607->vblank = v4l2_ctrl_new_std(&gc2607->ctrls,
++					    &gc2607_ctrl_ops,
++					    V4L2_CID_VBLANK,
++					    gc2607->cur_mode->vts - gc2607->cur_mode->height,
++					    GC2607_VTS_MAX - gc2607->cur_mode->height,
++					    1,
++					    gc2607->cur_mode->vts - gc2607->cur_mode->height);
++
+ 	/* Exposure control */
+ 	gc2607->exposure = v4l2_ctrl_new_std(&gc2607->ctrls,
+ 					      &gc2607_ctrl_ops,
+@@ -885,6 +956,14 @@ static int gc2607_probe(struct i2c_client *client)
+ 					  GC2607_GAIN_STEP,
+ 					  GC2607_GAIN_DEFAULT);
+ 
++	gc2607->digital_gain = v4l2_ctrl_new_std(&gc2607->ctrls,
++						 &gc2607_ctrl_ops,
++						 V4L2_CID_DIGITAL_GAIN,
++						 GC2607_DGAIN_MIN,
++						 GC2607_DGAIN_MAX,
++						 1,
++						 GC2607_DGAIN_DEFAULT);
++
+ 	gc2607->sd.ctrl_handler = &gc2607->ctrls;
+ 
+ 	if (gc2607->ctrls.error) {
+@@ -894,7 +973,6 @@ static int gc2607_probe(struct i2c_client *client)
+ 	}
+ 
+ 	/* Initialize current mode and format */
+-	gc2607->cur_mode = &gc2607_modes[0];
+ 	gc2607->fmt.width = gc2607->cur_mode->width;
+ 	gc2607->fmt.height = gc2607->cur_mode->height;
+ 	gc2607->fmt.code = MEDIA_BUS_FMT_SGRBG10_1X10;

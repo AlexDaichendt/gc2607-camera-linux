@@ -1,0 +1,13 @@
+assets/private/*
+!assets/private/README.md
+
+*.log
+*.raw
+*.png
+*.o
+*.ko
+*.cmd
+*.mod.c
+Module.symvers
+modules.order
+build*/
