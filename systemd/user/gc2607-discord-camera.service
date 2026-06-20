@@ -1,0 +1,18 @@
+[Unit]
+Description=GC2607 HAL virtual camera for Discord
+After=pipewire.service wireplumber.service
+Wants=pipewire.service wireplumber.service
+ConditionPathExists=/dev/video60
+
+[Service]
+Type=simple
+Environment=WIDTH=1280
+Environment=HEIGHT=720
+Environment=FPS=30
+Environment=FLIP_METHOD=rotate-180
+ExecStart=%h/bin/gc2607-discord-camera.sh /dev/video60
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

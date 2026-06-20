@@ -1,0 +1,291 @@
+diff --git a/config/linux/ipu6epmtl/libcamhal_profile.xml b/config/linux/ipu6epmtl/libcamhal_profile.xml
+index 3ac06bf..c79baf4 100644
+--- a/config/linux/ipu6epmtl/libcamhal_profile.xml
++++ b/config/linux/ipu6epmtl/libcamhal_profile.xml
+@@ -19,7 +19,7 @@
+         <version value="1.0"/>
+         <platform value="IPU6"/>
+         <!-- The value format of availableSensors is "sensor name"-wf/uf-"CSI port ID". -->
+-        <availableSensors value="ov05c10-uf-0,ov05c10-uf-4,ov08x40-uf-0,ov08x40-uf-4,
++        <availableSensors value="gc2607-uf-0,ov05c10-uf-0,ov05c10-uf-4,ov08x40-uf-0,ov08x40-uf-4,
+                                  ov13b10-uf-0,ov13b10-wf-4,ov5675-uf-4,ov01a1s-uf-0,
+                                  ov01a10-uf-0,ov01a10-uf-4,
+                                  ov02c10-uf-0,ov02c10-uf-1,ov02c10-uf-4,
+diff --git a/src/core/PSysProcessor.cpp b/src/core/PSysProcessor.cpp
+index 79f0733..2c2d9fe 100644
+--- a/src/core/PSysProcessor.cpp
++++ b/src/core/PSysProcessor.cpp
+@@ -16,6 +16,7 @@
+ 
+ #define LOG_TAG PSysProcessor
+ 
++#include <cstring>
+ #include <set>
+ #include <utility>
+ 
+@@ -47,6 +48,21 @@ using std::shared_ptr;
+ using std::unique_ptr;
+ 
+ namespace icamera {
++namespace {
++const int kGc2607SourceWidth = 1920;
++const int kGc2607SourceHeight = 1080;
++const int kGc2607PsysWidth = 1928;
++const int kGc2607PsysHeight = 1088;
++const int kGc2607PadLeftPixels = 4;
++const int kGc2607PadTopRows = 4;
++const int kGc2607BytesPerPixel = 2;
++
++bool isGc2607Camera(int cameraId) {
++    const char* sensorName = PlatformData::getSensorName(cameraId);
++    return sensorName && (std::strncmp(sensorName, "gc2607", 6) == 0);
++}
++}  // namespace
++
+ PSysProcessor::PSysProcessor(int cameraId, ParameterGenerator* pGenerator)
+         : mCameraId(cameraId),
+           mParameterGenerator(pGenerator),
+@@ -59,6 +75,8 @@ PSysProcessor::PSysProcessor(int cameraId, ParameterGenerator* pGenerator)
+           mOpaqueRawPort(INVALID_PORT),
+           mHoldRawBuffers(false),
+           mLastStillTnrSequence(-1),
++          mUseGc2607RawPadding(false),
++          mGc2607PaddingBufferIndex(0),
+           mStatus(PIPELINE_UNCREATED) {
+     mProcessThread = new ProcessThread(this);
+     CLEAR(mSofTimestamp);
+@@ -94,6 +112,12 @@ int PSysProcessor::configure(const std::vector<ConfigMode>& configModes) {
+     mOpaqueRawPort = INVALID_PORT;
+     mRawPort = INVALID_PORT;
+     mRunAicAfterQTask = false;
++    mUseGc2607RawPadding = false;
++    mGc2607PaddingBufferIndex = 0;
++    mGc2607OriginalInputBuffers.clear();
++    mGc2607PaddedInputBuffers.clear();
++    CameraBufQ emptyGc2607PaddingBuffers;
++    std::swap(mGc2607PaddingFreeBuffers, emptyGc2607PaddingBuffers);
+ 
+     std::map<Port, stream_t> outputFrameInfo;
+     stream_t stillStream = {}, videoStream = {};
+@@ -125,6 +149,9 @@ int PSysProcessor::configure(const std::vector<ConfigMode>& configModes) {
+         mRunAicAfterQTask = true;
+     }
+ 
++    std::map<Port, stream_t> psysInputFrameInfo = mInputFrameInfo;
++    adjustGc2607PsysInputInfo(&psysInputFrameInfo);
++
+     int ret = OK;
+     // Create PSysDAG according to real configure mode
+     for (auto& cfg : mConfigModes) {
+@@ -139,7 +166,7 @@ int PSysProcessor::configure(const std::vector<ConfigMode>& configModes) {
+         LOG1("%s, Create PSysDAG for ConfigMode %d", __func__, cfg);
+         unique_ptr<PSysDAG> pSysDAG = unique_ptr<PSysDAG>(new PSysDAG(mCameraId, mScheduler, this));
+ 
+-        pSysDAG->setFrameInfo(mInputFrameInfo, outputFrameInfo);
++        pSysDAG->setFrameInfo(psysInputFrameInfo, outputFrameInfo);
+         bool useTnrOutBuffer = mOpaqueRawPort != INVALID_PORT;
+         ret = pSysDAG->configure(tuningConfig.configMode, tuningConfig.tuningMode, useTnrOutBuffer);
+         CheckAndLogError(ret != OK, ret, "@%s configure psys dag failed:%d", __func__, ret);
+@@ -376,6 +403,133 @@ bool PSysProcessor::needSkipOutputFrame(int64_t sequence) {
+     return false;
+ }
+ 
++bool PSysProcessor::isGc2607RawPaddingRequired(const std::map<Port, stream_t>& inputInfo) const {
++    if (!isGc2607Camera(mCameraId)) return false;
++
++    for (const auto& item : inputInfo) {
++        const stream_t& stream = item.second;
++        if (stream.format == V4L2_PIX_FMT_SGRBG10 && stream.width == kGc2607SourceWidth &&
++            stream.height == kGc2607SourceHeight) {
++            return true;
++        }
++    }
++
++    return false;
++}
++
++void PSysProcessor::adjustGc2607PsysInputInfo(std::map<Port, stream_t>* inputInfo) {
++    if (!inputInfo || !isGc2607RawPaddingRequired(*inputInfo)) return;
++
++    mUseGc2607RawPadding = true;
++    for (auto& item : *inputInfo) {
++        stream_t& stream = item.second;
++        if (stream.format == V4L2_PIX_FMT_SGRBG10 && stream.width == kGc2607SourceWidth &&
++            stream.height == kGc2607SourceHeight) {
++            LOG1("Enable GC2607 PSYS raw padding on port:%d (%dx%d -> %dx%d)", item.first,
++                 stream.width, stream.height, kGc2607PsysWidth, kGc2607PsysHeight);
++            stream.width = kGc2607PsysWidth;
++            stream.height = kGc2607PsysHeight;
++        }
++    }
++}
++
++shared_ptr<CameraBuffer> PSysProcessor::getGc2607PaddingBuffer() {
++    if (!mGc2607PaddingFreeBuffers.empty()) {
++        shared_ptr<CameraBuffer> buffer = mGc2607PaddingFreeBuffers.front();
++        mGc2607PaddingFreeBuffers.pop();
++        return buffer;
++    }
++
++    int size = CameraUtils::getFrameSize(V4L2_PIX_FMT_SGRBG10, kGc2607PsysWidth,
++                                         kGc2607PsysHeight, true);
++    shared_ptr<CameraBuffer> buffer =
++        CameraBuffer::create(mCameraId, BUFFER_USAGE_GENERAL, V4L2_MEMORY_USERPTR, size,
++                             mGc2607PaddingBufferIndex++, V4L2_PIX_FMT_SGRBG10,
++                             kGc2607PsysWidth, kGc2607PsysHeight);
++    CheckAndLogError(!buffer, nullptr, "%s, failed to allocate GC2607 padding buffer", __func__);
++    return buffer;
++}
++
++status_t PSysProcessor::padGc2607InputBuffers(CameraBufferPortMap* srcBuffers) {
++    if (!mUseGc2607RawPadding || !srcBuffers || srcBuffers->empty()) return OK;
++
++    CameraBufferPortMap originalBuffers;
++    CameraBufferPortMap paddedBuffers;
++    for (auto& item : *srcBuffers) {
++        shared_ptr<CameraBuffer> srcBuffer = item.second;
++        if (!srcBuffer || srcBuffer->getFormat() != V4L2_PIX_FMT_SGRBG10 ||
++            srcBuffer->getWidth() != kGc2607SourceWidth ||
++            srcBuffer->getHeight() != kGc2607SourceHeight) {
++            paddedBuffers[item.first] = srcBuffer;
++            continue;
++        }
++
++        shared_ptr<CameraBuffer> dstBuffer = getGc2607PaddingBuffer();
++        CheckAndLogError(!dstBuffer, NO_MEMORY, "%s, no GC2607 padding buffer", __func__);
++
++        ScopeMapping srcMapper(srcBuffer);
++        ScopeMapping dstMapper(dstBuffer);
++        auto* src = static_cast<unsigned char*>(srcMapper.getUserPtr());
++        auto* dst = static_cast<unsigned char*>(dstMapper.getUserPtr());
++        CheckAndLogError(!src || !dst, BAD_VALUE, "%s, failed to map GC2607 buffers", __func__);
++
++        const int srcStride = srcBuffer->getStride();
++        const int dstStride = dstBuffer->getStride();
++        const int copyBytes = kGc2607SourceWidth * kGc2607BytesPerPixel;
++        const int dstLeftOffset = kGc2607PadLeftPixels * kGc2607BytesPerPixel;
++        memset(dst, 0, dstBuffer->getBufferSize());
++
++        for (int row = 0; row < kGc2607SourceHeight; row++) {
++            unsigned char* dstRow = dst + ((row + kGc2607PadTopRows) * dstStride) + dstLeftOffset;
++            const unsigned char* srcRow = src + (row * srcStride);
++            MEMCPY_S(dstRow, dstStride - dstLeftOffset, srcRow, copyBytes);
++        }
++
++        dstBuffer->updateV4l2Buffer(*srcBuffer->getV4L2Buffer().Get());
++        dstBuffer->setBytesused(dstBuffer->getBufferSize());
++        dstBuffer->setSettingSequence(srcBuffer->getSettingSequence());
++
++        originalBuffers[item.first] = srcBuffer;
++        paddedBuffers[item.first] = dstBuffer;
++        item.second = dstBuffer;
++
++        LOG2("%s, padded GC2607 input seq:%d port:%d %dx%d/%d -> %dx%d/%d", __func__,
++             dstBuffer->getSequence(), item.first, srcBuffer->getWidth(), srcBuffer->getHeight(),
++             srcStride, dstBuffer->getWidth(), dstBuffer->getHeight(), dstStride);
++    }
++
++    if (!originalBuffers.empty()) {
++        int64_t sequence = originalBuffers.begin()->second->getSequence();
++        mGc2607OriginalInputBuffers[sequence] = originalBuffers;
++        mGc2607PaddedInputBuffers[sequence] = paddedBuffers;
++    }
++
++    return OK;
++}
++
++CameraBufferPortMap PSysProcessor::getGc2607OriginalInputBuffers(int64_t sequence) {
++    auto it = mGc2607OriginalInputBuffers.find(sequence);
++    if (it == mGc2607OriginalInputBuffers.end()) return CameraBufferPortMap();
++
++    CameraBufferPortMap buffers = it->second;
++    mGc2607OriginalInputBuffers.erase(it);
++    return buffers;
++}
++
++void PSysProcessor::recycleGc2607PaddingBuffers(int64_t sequence) {
++    auto it = mGc2607PaddedInputBuffers.find(sequence);
++    if (it == mGc2607PaddedInputBuffers.end()) return;
++
++    for (auto& item : it->second) {
++        if (item.second && item.second->getFormat() == V4L2_PIX_FMT_SGRBG10 &&
++            item.second->getWidth() == kGc2607PsysWidth &&
++            item.second->getHeight() == kGc2607PsysHeight) {
++            mGc2607PaddingFreeBuffers.push(item.second);
++        }
++    }
++    mGc2607PaddedInputBuffers.erase(it);
++}
++
+ /**
+  * Check if 'inBuffer' can be used for 'settingSequence' to run PSys pipe.
+  *
+@@ -837,6 +991,8 @@ status_t PSysProcessor::prepareTask(CameraBufferPortMap* srcBuffers,
+                                     CameraBufferPortMap* dstBuffers) {
+     CheckAndLogError(srcBuffers->empty() || dstBuffers->empty(), UNKNOWN_ERROR,
+                      "%s, the input or output buffer is empty", __func__);
++    int ret = OK;
++
+     if (mHoldRawBuffers && mOpaqueRawPort == INVALID_PORT) {
+         saveRawBuffer(srcBuffers);
+     }
+@@ -933,6 +1089,9 @@ status_t PSysProcessor::prepareTask(CameraBufferPortMap* srcBuffers,
+     }
+ 
+     if (needRunPipe) {
++        ret = padGc2607InputBuffers(srcBuffers);
++        CheckAndLogError(ret != OK, ret, "%s, Failed to pad GC2607 input", __func__);
++
+         // Raw output already has been returned back, and don't need to handle again.
+         if (!hasRawOutput) {
+             // handle buffer done for normal YUV output
+@@ -1238,7 +1397,9 @@ void PSysProcessor::onFrameDone(const PSysTaskData& result) {
+              __func__, settingSequence, sequence, hasRawOutput, holdOnInput);
+         // Return buffer only if the buffer is not used in the future.
+         if (!holdOnInput && mBufferProducer && !hasRawOutput) {
+-            for (const auto& src : result.mInputBuffers) {
++            CameraBufferPortMap inputBuffers = getGc2607OriginalInputBuffers(sequence);
++            if (inputBuffers.empty()) inputBuffers = result.mInputBuffers;
++            for (const auto& src : inputBuffers) {
+                 mBufferProducer->qbuf(src.first, src.second);
+ 
+                 if (src.second->getStreamType() == CAMERA_STREAM_INPUT) {
+@@ -1250,6 +1411,8 @@ void PSysProcessor::onFrameDone(const PSysTaskData& result) {
+         }
+     }
+ 
++    recycleGc2607PaddingBuffers(sequence);
++
+     {
+         AutoMutex l(mBufferQueueLock);
+         std::multiset<int64_t>::iterator it = mSequencesInflight.find(sequence);
+diff --git a/src/core/PSysProcessor.h b/src/core/PSysProcessor.h
+index 595485b..d6b58f1 100644
+--- a/src/core/PSysProcessor.h
++++ b/src/core/PSysProcessor.h
+@@ -75,6 +75,12 @@ class PSysProcessor : public BufferQueue, public PSysDagCallback {
+     status_t prepareTask(CameraBufferPortMap* srcBuffers, CameraBufferPortMap* dstBuffers);
+     void dispatchTask(CameraBufferPortMap& inBuf, CameraBufferPortMap& outBuf,
+                       bool fakeTask = false, bool callbackRgbs = false);
++    bool isGc2607RawPaddingRequired(const std::map<Port, stream_t>& inputInfo) const;
++    void adjustGc2607PsysInputInfo(std::map<Port, stream_t>* inputInfo);
++    status_t padGc2607InputBuffers(CameraBufferPortMap* srcBuffers);
++    std::shared_ptr<CameraBuffer> getGc2607PaddingBuffer();
++    CameraBufferPortMap getGc2607OriginalInputBuffers(int64_t sequence);
++    void recycleGc2607PaddingBuffers(int64_t sequence);
+ 
+     void handleEvent(EventData eventData);
+     // DOL_FEATURE_S
+@@ -146,6 +152,12 @@ class PSysProcessor : public BufferQueue, public PSysDagCallback {
+     // Indicate the latest sequence of raw buffer used in still TNR
+     int64_t mLastStillTnrSequence;
+ 
++    bool mUseGc2607RawPadding;
++    int mGc2607PaddingBufferIndex;
++    CameraBufQ mGc2607PaddingFreeBuffers;
++    std::map<int64_t, CameraBufferPortMap> mGc2607OriginalInputBuffers;
++    std::map<int64_t, CameraBufferPortMap> mGc2607PaddedInputBuffers;
++
+     enum { PIPELINE_UNCREATED = 0, PIPELINE_CREATED } mStatus;
+ };  // End of class PSysProcessor
+ 
