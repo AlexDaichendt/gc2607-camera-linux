@@ -1,7 +1,7 @@
 # GC2607 Linux Camera Bring-Up
 
-This repo documents and packages the patches/scripts needed to reproduce the working GC2607 camera
-state on the MateBook host.
+This repo packages the patches, HAL assets, and runtime scripts needed to reproduce the working
+GC2607 camera state on Linux.
 
 The working path is:
 
@@ -9,7 +9,7 @@ The working path is:
 GC2607 kernel driver, stable 1920x1080 raw
   -> Intel IPU6 HAL producer at 1920x1080
   -> HAL padding bridge to 1928x1088
-  -> GC2607 Windows-derived graph + AIQB
+  -> GC2607 graph + AIQB
   -> PSYS/AIQ ISP output as NV12 1920x1080
   -> optional v4l2loopback camera for Discord
 ```
@@ -17,73 +17,83 @@ GC2607 kernel driver, stable 1920x1080 raw
 ## Repo Layout
 
 ```text
+assets/hal/            GC2607 AIQB and graph XML used by the working HAL pipeline
 patches/driver/        Kernel driver patches for gc2607-v4l2-driver
 patches/hal/           Intel IPU6 HAL source/XML patches
 scripts/               Runtime and install helper scripts
 systemd/user/          User service for the Discord virtual camera bridge
 config/                v4l2loopback boot config examples
-docs/                  Bring-up notes and private asset documentation
-assets/private/        Local-only place for Windows-derived assets; ignored by git
+docs/                  Bring-up notes and asset checksums
 ```
 
-## What Is Not Committed
+## Clone The Required Repos
 
-The AIQB and Windows graph XML are required for the best-quality path, but they are not committed
-here because they came from the Windows driver payload and may not be redistributable.
-
-Expected private asset filenames:
-
-```text
-gc2607_gc2607_MTL.aiqb
-graph_settings_gc2607_gc2607_MTL.xml
-graph_descriptor.xml
-```
-
-See `docs/private-assets.md` for checksums from the working machine.
-
-## Source Repos
-
-Expected source locations on the host:
+Pick a workspace directory and clone this bring-up repo plus the upstream sources:
 
 ```sh
-~/repos/gc2607-v4l2-driver
-~/repos/ipu6-camera-hal-gc2607
+export WORKDIR="$HOME/src/gc2607-camera"
+mkdir -p "$WORKDIR"
+cd "$WORKDIR"
+
+git clone https://github.com/abbood/gc2607-v4l2-driver.git
+git clone https://github.com/intel/ipu6-camera-hal.git
+git clone https://github.com/intel/ipu6-drivers.git
+
+# If you are reading this from a local checkout, copy or clone this repo here too.
+# Replace the URL with your published fork/remote when available.
+git clone <gc2607-camera-linux-bringup-url> gc2607-camera-linux-bringup
+```
+
+The commands below assume those paths:
+
+```sh
+export BRINGUP="$WORKDIR/gc2607-camera-linux-bringup"
+export DRIVER="$WORKDIR/gc2607-v4l2-driver"
+export HAL="$WORKDIR/ipu6-camera-hal"
+export IPU6_DRIVERS="$WORKDIR/ipu6-drivers"
 ```
 
 ## Apply Driver Patch
 
 ```sh
-cd ~/repos/gc2607-v4l2-driver
-git apply ~/repos/gc2607-camera-linux-bringup/patches/driver/0001-gc2607-controls-timing-for-ipu6.patch
+cd "$DRIVER"
+git apply "$BRINGUP/patches/driver/0001-gc2607-controls-timing-for-ipu6.patch"
 make
 ```
 
 The driver patch keeps the sensor on the stable `1920x1080` mode and adds the controls/timing the
 IPU6 HAL needs.
 
-## Apply HAL Patches
+## Apply HAL Patches And Assets
 
 ```sh
-cd ~/repos/ipu6-camera-hal-gc2607
-git apply ~/repos/gc2607-camera-linux-bringup/patches/hal/0001-gc2607-profile-and-psys-padding.patch
-git apply ~/repos/gc2607-camera-linux-bringup/patches/hal/0002-add-gc2607-sensor-xml.patch
+cd "$HAL"
+git apply "$BRINGUP/patches/hal/0001-gc2607-profile-and-psys-padding.patch"
+git apply "$BRINGUP/patches/hal/0002-add-gc2607-sensor-xml.patch"
+
+"$BRINGUP/scripts/install-hal-assets.sh" "$HAL"
 ```
 
-Then install the private Windows-derived assets into the HAL tree:
+Build and install the HAL prefix. The exact CMake configure command depends on the distro and any
+existing local packaging, but the working host used a build directory named `build-gc2607`:
 
 ```sh
-~/repos/gc2607-camera-linux-bringup/scripts/install-private-hal-assets.sh \
-  ~/repos/ipu6-camera-hal-gc2607 \
-  ~/repos/gc2607-camera-linux-bringup/assets/private
-```
-
-Build and install the HAL prefix:
-
-```sh
-cd ~/repos/ipu6-camera-hal-gc2607
+cd "$HAL"
 cmake --build build-gc2607 -j"$(nproc)"
 cmake --install build-gc2607 --prefix "$HOME/opt/gc2607-ipu6"
 ```
+
+## PSYS Driver Support
+
+The HAL path needs `/dev/ipu-psys0`. If your distro kernel does not already provide the IPU6 PSYS
+driver, build/install it from:
+
+```sh
+cd "$IPU6_DRIVERS"
+```
+
+Use the build instructions from Intel's `ipu6-drivers` repo for your kernel. On the working host,
+the PSYS module was built from that repo and `intel-ipu6-psys.ko` was loaded successfully.
 
 ## Verify HAL Output
 
@@ -110,15 +120,15 @@ virtual webcam fed by the HAL pipeline.
 One-time loopback setup:
 
 ```sh
-sudo cp ~/repos/gc2607-camera-linux-bringup/config/modprobe.d/gc2607-loopback.conf /etc/modprobe.d/
-sudo cp ~/repos/gc2607-camera-linux-bringup/config/modules-load.d/gc2607-loopback.conf /etc/modules-load.d/
+sudo cp "$BRINGUP/config/modprobe.d/gc2607-loopback.conf" /etc/modprobe.d/
+sudo cp "$BRINGUP/config/modules-load.d/gc2607-loopback.conf" /etc/modules-load.d/
 sudo modprobe v4l2loopback
 ```
 
 Install the user service:
 
 ```sh
-~/repos/gc2607-camera-linux-bringup/scripts/install-discord-service.sh
+"$BRINGUP/scripts/install-discord-service.sh"
 ```
 
 Start only when needed to save battery:
