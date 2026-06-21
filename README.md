@@ -237,6 +237,34 @@ On the validated laptop the sensor is physically mounted inverted, so the captur
 `videoflip method=rotate-180` after HAL processing. Override with `GC2607_FLIP_METHOD=identity` if
 your hardware does not need that correction.
 
+## Use As An On-Demand Virtual Webcam
+
+For compatibility with Discord, Telegram, and browser WebRTC camera pickers, use the GStreamer HAL
+output as a `v4l2loopback` virtual webcam:
+
+```sh
+"$BRINGUP/scripts/install-virtual-camera-desktop.sh"
+"$BRINGUP/scripts/virtual-camera.sh" prepare
+"$BRINGUP/scripts/virtual-camera.sh" start
+```
+
+Select `GC2607 Virtual Camera` in the application, then stop the real camera pipeline when done:
+
+```sh
+"$BRINGUP/scripts/virtual-camera.sh" stop
+```
+
+`install-virtual-camera-desktop.sh` hides the raw IPU6 and uncalibrated libcamera GC2607 sources
+from WirePlumber. `prepare` creates the cheap virtual V4L2 device and registers it with PipeWire
+without opening the real camera. `start` arms an on-demand watcher: it keeps a black standby stream
+attached so WebRTC camera pickers can see `/dev/video60`, then swaps in the real `icamerasrc`
+feeder only while an app actually opens `GC2607 Virtual Camera`. The script is deliberately not
+installed as an autostart service, so messaging apps can remain open without keeping the camera
+active.
+
+See `docs/virtual-camera.md` for status, logs, output-mode overrides, and unloading the loopback
+device.
+
 ## Runtime Checks
 
 Use:

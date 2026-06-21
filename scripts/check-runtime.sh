@@ -7,13 +7,13 @@ export LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/lib/libcamhal/plugins:${LD_LIBRARY_P
 export GST_PLUGIN_PATH="$PREFIX/lib/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
 export GST_REGISTRY="${GST_REGISTRY:-$PREFIX/gstreamer-registry.bin}"
 
-for command in gst-launch-1.0 gst-inspect-1.0 v4l2-ctl media-ctl modinfo dkms; do
+for command in gst-launch-1.0 gst-inspect-1.0 v4l2-ctl media-ctl modinfo dkms systemd-run; do
     printf "%-18s" "$command:"
     command -v "$command" || true
 done
 
 echo "--- gstreamer elements ---"
-for element in icamerasrc videoflip videoconvert jpegenc multifilesink fakesink; do
+for element in icamerasrc videoflip videoconvert videoscale videorate jpegenc multifilesink fakesink v4l2sink; do
     if gst-inspect-1.0 "$element" >/dev/null 2>&1; then
         echo "$element: ok"
     else
@@ -45,3 +45,8 @@ fi
 
 echo "--- video devices ---"
 v4l2-ctl --list-devices 2>/dev/null || true
+
+echo "--- virtual camera ---"
+modinfo v4l2loopback >/dev/null 2>&1 && echo "v4l2loopback: modinfo ok" || echo "v4l2loopback: missing from module tree"
+lsmod | rg "^v4l2loopback\b" || echo "v4l2loopback: not loaded"
+"$(dirname "$0")/virtual-camera.sh" status 2>/dev/null || true
