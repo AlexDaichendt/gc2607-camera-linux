@@ -9,8 +9,6 @@ if [[ ! -d "$PREFIX" ]]; then
     exit 1
 fi
 
-systemctl --user stop wireplumber.service 2>/dev/null || true
-
 export LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/lib/libcamhal/plugins:${LD_LIBRARY_PATH:-}"
 export GST_PLUGIN_PATH="$PREFIX/lib/gstreamer-1.0"
 export GST_REGISTRY="$PREFIX/gstreamer-registry.bin"

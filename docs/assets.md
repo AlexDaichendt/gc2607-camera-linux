@@ -1,6 +1,6 @@
 # Included HAL Assets
 
-This repo includes the GC2607 AIQB and graph XML files used by the working IPU6 HAL pipeline.
+This repo includes the GC2607 AIQB and graph XML files used by the IPU6 HAL pipeline.
 
 Included files:
 
@@ -25,4 +25,4 @@ scripts/install-hal-assets.sh /path/to/ipu6-camera-hal
 ```
 
 These assets came from the Windows driver payload used during bring-up. Verify redistribution terms
-before publishing this repo somewhere public.
+before publishing this repo publicly.

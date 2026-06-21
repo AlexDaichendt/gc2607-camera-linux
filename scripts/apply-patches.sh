@@ -39,9 +39,8 @@ apply_patch_once "$HAL" "$BRINGUP/patches/hal/0002-add-gc2607-sensor-xml.patch"
 cat <<EOF
 Patches and HAL assets are applied.
 
-Next driver build:
-  cd "$DRIVER"
-  make
+Next driver install:
+  sudo DRIVER="$DRIVER" "$BRINGUP/scripts/install-gc2607-dkms.sh"
 
 Next HAL build depends on your local CMake configuration. If you already configured build-gc2607:
   cd "$HAL"
