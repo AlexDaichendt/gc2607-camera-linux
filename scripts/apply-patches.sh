@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WORKDIR="${1:-${WORKDIR:-$HOME/src/gc2607-camera}}"
 BRINGUP="${BRINGUP:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-DRIVER="${DRIVER:-$WORKDIR/gc2607-v4l2-driver}"
-HAL="${HAL:-$WORKDIR/ipu6-camera-hal}"
+SOURCE_ROOT="${1:-${WORKDIR:-$BRINGUP/third_party}}"
+DRIVER="${DRIVER:-$SOURCE_ROOT/gc2607-v4l2-driver}"
+HAL="${HAL:-$SOURCE_ROOT/ipu6-camera-hal}"
 
 if [[ ! -d "$DRIVER/.git" ]]; then
     echo "Missing driver repo: $DRIVER" >&2
+    echo "Run '$BRINGUP/scripts/clone-sources.sh' to initialize submodules, or set DRIVER=/path/to/gc2607-v4l2-driver." >&2
     exit 1
 fi
 
 if [[ ! -d "$HAL/.git" ]]; then
     echo "Missing HAL repo: $HAL" >&2
+    echo "Run '$BRINGUP/scripts/clone-sources.sh' to initialize submodules, or set HAL=/path/to/ipu6-camera-hal." >&2
     exit 1
 fi
 

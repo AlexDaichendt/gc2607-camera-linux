@@ -2,8 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKDIR="$(cd "$ROOT/.." && pwd)"
-DRIVER="${DRIVER:-${1:-$WORKDIR/gc2607-v4l2-driver}}"
+DRIVER="${DRIVER:-${1:-$ROOT/third_party/gc2607-v4l2-driver}}"
 PACKAGE_NAME=gc2607
 PACKAGE_VERSION=0.1.0
 SOURCE_DIR="/usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION}"
