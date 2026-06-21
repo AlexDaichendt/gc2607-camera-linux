@@ -53,6 +53,8 @@ config/           boot-time module and udev configuration
 docs/             asset checksums, raw capture, and troubleshooting notes
 patches/driver/   patch for the GC2607 V4L2 driver
 patches/hal/      patches for Intel ipu6-camera-hal
+patches/ipu6-drivers/
+                  patch for the older out-of-tree IPU bridge table
 scripts/          clone, patch, install, and validation scripts
 third_party/      upstream source repos tracked as git submodules
 ```
@@ -119,6 +121,9 @@ cd "$HAL"
 git apply "$BRINGUP/patches/hal/0001-gc2607-profile-and-psys-padding.patch"
 git apply "$BRINGUP/patches/hal/0002-add-gc2607-sensor-xml.patch"
 "$BRINGUP/scripts/install-hal-assets.sh" "$HAL"
+
+cd "$IPU6_DRIVERS"
+git apply "$BRINGUP/patches/ipu6-drivers/0001-cio2-bridge-add-gc2607-sensor.patch"
 ```
 
 Included HAL assets:
@@ -144,6 +149,12 @@ Install Intel IPU6 PSYS support with DKMS:
 ```sh
 IPU6_DRIVERS="$IPU6_DRIVERS" "$BRINGUP/scripts/install-ipu6-psys-dkms.sh"
 ```
+
+The GC2607 also needs an IPU bridge sensor-table entry for ACPI HID `GCTI2607`
+with link frequency `336000000`. The included `ipu6-drivers` patch covers older
+out-of-tree bridge builds. On current kernels where `modinfo ipu-bridge` points
+at the distro kernel module, rebuild or override that kernel module with the
+same entry. See `docs/ipu-bridge.md`.
 
 Install boot-time module loading and `/dev/ipu-psys0` permissions:
 

@@ -1,0 +1,12 @@
+diff --git a/drivers/media/pci/intel/cio2-bridge.c b/drivers/media/pci/intel/cio2-bridge.c
+--- a/drivers/media/pci/intel/cio2-bridge.c
++++ b/drivers/media/pci/intel/cio2-bridge.c
+@@ -55,6 +55,8 @@ static const struct cio2_sensor_config cio2_supported_sensors[] = {
+ 	CIO2_SENSOR_CONFIG("OVTI08A1", 1, 500000000),
+ 	/* Omnivision ov08x40 */
+ 	CIO2_SENSOR_CONFIG("OVTI08F4", 1, 400000000),
++	/* GalaxyCore GC2607 */
++	CIO2_SENSOR_CONFIG("GCTI2607", 1, 336000000),
+ };
+ 
+ static const struct cio2_property_names prop_names = {
