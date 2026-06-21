@@ -1,93 +1,159 @@
 # Troubleshooting
 
-## Discord Shows `ipu6` But The Image Is Black
-
-The `ipu6` devices are raw IPU6/ISYS nodes, not a normal processed webcam. Discord cannot use raw
-Bayer frames directly.
-
-Use the virtual camera:
-
-```sh
-systemctl --user start gc2607-discord-camera.service
-```
-
-Then select:
+This repo stops at kernel/HAL/GStreamer validation. The expected processed-frame path is:
 
 ```text
-GC2607 HAL Camera
+gc2607 kernel driver -> Intel IPU6 ISYS -> Intel HAL/PSYS -> icamerasrc -> GStreamer sink
 ```
 
-## Virtual Camera Is Missing
+## GC2607 Driver Is Missing
 
-Check the loopback module:
+Check DKMS and module loading:
 
 ```sh
-ls -l /dev/video60
-modinfo v4l2loopback
+dkms status -m gc2607
+modinfo gc2607
+lsmod | rg "^gc2607\b"
+find /sys/bus/i2c/drivers/gc2607 -maxdepth 1 -mindepth 1 -printf "%f\n"
 ```
 
-Load it manually:
+Expected bound device:
 
-```sh
-sudo modprobe v4l2loopback video_nr=60 card_label="GC2607 HAL Camera" exclusive_caps=1
+```text
+i2c-GCTI2607:00
 ```
 
-## Camera Is Busy
-
-Stop PipeWire/WirePlumber while testing:
+If missing, install the patched driver:
 
 ```sh
-systemctl --user stop wireplumber.service 2>/dev/null || true
+sudo DRIVER="$DRIVER" "$BRINGUP/scripts/install-gc2607-dkms.sh"
 ```
 
-Find users of video/media nodes:
+## PSYS Device Is Missing
+
+The HAL path needs `/dev/ipu-psys0`.
+
+Check:
 
 ```sh
-sudo fuser -v /dev/video* /dev/v4l-subdev* /dev/media*
-```
-
-## Need To Reload The GC2607 Driver
-
-```sh
-cd "$DRIVER"
-echo i2c-GCTI2607:00 | sudo tee /sys/bus/i2c/drivers/gc2607/unbind
-sudo rmmod gc2607
-sudo insmod ./gc2607.ko
-```
-
-If bind reports `Device or resource busy`, the sensor may already be bound.
-
-## HAL Fails Before Stream-On
-
-Check that `/dev/ipu-psys0` exists:
-
-```sh
+lsmod | rg "intel_ipu6.*psys|intel_ipu6_psys"
 ls -l /dev/ipu-psys0
 ```
 
-If it is missing, build/load the IPU6 PSYS driver from Intel's `ipu6-drivers` repo.
-
-## Image Is Upside Down In Discord
-
-The Discord bridge rotates by default:
+Install PSYS support:
 
 ```sh
-FLIP_METHOD=rotate-180 ~/bin/gc2607-discord-camera.sh
+IPU6_DRIVERS="$IPU6_DRIVERS" "$BRINGUP/scripts/install-ipu6-psys-dkms.sh"
+"$BRINGUP/scripts/install-system-config.sh"
 ```
 
-To test other orientations:
+Expected permissions:
 
-```sh
-FLIP_METHOD=none ~/bin/gc2607-discord-camera.sh
-FLIP_METHOD=vertical-flip ~/bin/gc2607-discord-camera.sh
+```text
+root video ... /dev/ipu-psys0
 ```
 
-## The GStreamer Bridge Uses Battery
+## HAL Assets Are Missing
 
-The virtual camera bridge keeps the sensor, IPU6 pipeline, and GStreamer conversion path active.
-Start it for calls and stop it afterward:
+Check installed GC2607 assets:
 
 ```sh
-systemctl --user start gc2607-discord-camera.service
-systemctl --user stop gc2607-discord-camera.service
+PREFIX="${GC2607_PREFIX:-$HOME/opt/gc2607-ipu6}"
+find "$PREFIX/etc/camera" -iname "*gc2607*" -o -iname "graph_settings_gc2607*"
+```
+
+The HAL install should include:
+
+```text
+gc2607_gc2607_MTL.aiqb
+graph_settings_gc2607_gc2607_MTL.xml
+gc2607-uf.xml
+```
+
+Reinstall assets into the HAL checkout and rebuild/install the HAL:
+
+```sh
+"$BRINGUP/scripts/install-hal-assets.sh" "$HAL"
+cd "$HAL"
+cmake --build build-gc2607 -j"$(nproc)"
+cmake --install build-gc2607
+```
+
+## icamerasrc Is Missing
+
+Check:
+
+```sh
+gst-inspect-1.0 icamerasrc
+```
+
+If missing, install/build Intel's `icamerasrc` slim API plugin for your distro and make sure
+`GST_PLUGIN_PATH` points at the HAL prefix:
+
+```sh
+export GC2607_PREFIX="$HOME/opt/gc2607-ipu6"
+export GST_PLUGIN_PATH="$GC2607_PREFIX/lib/gstreamer-1.0"
+export GST_REGISTRY="$GC2607_PREFIX/gstreamer-registry.bin"
+```
+
+## GStreamer Does Not Produce Frames
+
+Run the HAL smoke test:
+
+```sh
+"$BRINGUP/scripts/verify-hal.sh"
+```
+
+For more logging:
+
+```sh
+export cameraDebug=0x2
+GST_DEBUG=2 "$BRINGUP/scripts/verify-hal.sh"
+```
+
+Check kernel messages:
+
+```sh
+journalctl -k -b --no-pager | rg -i "gc2607|ipu6|isys|psys|stream"
+```
+
+The expected sensor activity includes stream-on and stream-off messages from the GC2607 driver.
+
+## Captured JPEG Is Black Or Stale
+
+Capture a short sequence instead of a single first frame:
+
+```sh
+"$BRINGUP/scripts/capture-gst-frame.sh" /tmp/gc2607-frame 30
+```
+
+Inspect the later frames in the sequence. The first few frames after stream start can be less useful
+while exposure and processing settle.
+
+## Captured JPEG Is Upside Down
+
+The tested laptop needs a 180-degree display correction after HAL processing. The capture script
+defaults to:
+
+```sh
+GC2607_FLIP_METHOD=rotate-180
+```
+
+Set `GC2607_FLIP_METHOD=identity` when running `scripts/capture-gst-frame.sh` if your panel mounts
+the sensor in the opposite orientation.
+
+## Raw Capture Works But HAL Does Not
+
+If `docs/direct-raw.md` works but `icamerasrc` fails, focus on:
+
+- installed HAL prefix and `LD_LIBRARY_PATH`
+- installed `icamerasrc` plugin and `GST_PLUGIN_PATH`
+- GC2607 AIQB/XML assets under the HAL prefix
+- PSYS module availability and `/dev/ipu-psys0` permissions
+- HAL patch application state
+
+Use:
+
+```sh
+"$BRINGUP/scripts/check-runtime.sh"
 ```
