@@ -54,37 +54,31 @@ docs/             asset checksums, raw capture, and troubleshooting notes
 patches/driver/   patch for the GC2607 V4L2 driver
 patches/hal/      patches for Intel ipu6-camera-hal
 scripts/          clone, patch, install, and validation scripts
+third_party/      upstream source repos tracked as git submodules
 ```
 
 ## Required Sources
 
-Use a neutral workspace. The examples below assume:
+Clone this repo with its third-party source submodules:
 
 ```sh
-export WORKDIR="$HOME/src/gc2607-camera"
-export BRINGUP="$WORKDIR/gc2607-camera-linux-bringup"
-export DRIVER="$WORKDIR/gc2607-v4l2-driver"
-export HAL="$WORKDIR/ipu6-camera-hal"
-export IPU6_DRIVERS="$WORKDIR/ipu6-drivers"
+git clone --recurse-submodules https://github.com/AlexDaichendt/gc2607-camera-linux
+cd gc2607-camera-linux
 ```
 
-Clone the upstream source repos:
+If this repo is already checked out, initialize or refresh the source submodules:
 
 ```sh
-mkdir -p "$WORKDIR"
-cd "$WORKDIR"
-
-git clone https://github.com/abbood/gc2607-v4l2-driver.git
-git clone https://github.com/intel/ipu6-camera-hal.git
-git clone https://github.com/intel/ipu6-drivers.git
-
-git clone <gc2607-camera-linux-bringup-url> gc2607-camera-linux-bringup
+git submodule update --init --recursive
 ```
 
-If this repo is already checked out, clone only the external sources:
+The examples below assume:
 
 ```sh
-"$BRINGUP/scripts/clone-sources.sh" "$WORKDIR"
+export BRINGUP="$PWD"
+export DRIVER="$BRINGUP/third_party/gc2607-v4l2-driver"
+export HAL="$BRINGUP/third_party/ipu6-camera-hal"
+export IPU6_DRIVERS="$BRINGUP/third_party/ipu6-drivers"
 ```
 
 ## Dependencies
@@ -112,7 +106,7 @@ https://github.com/intel/icamerasrc/tree/icamerasrc_slim_api
 Automatic:
 
 ```sh
-"$BRINGUP/scripts/apply-patches.sh" "$WORKDIR"
+"$BRINGUP/scripts/apply-patches.sh"
 ```
 
 Manual equivalent:

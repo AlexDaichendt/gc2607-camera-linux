@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KERNEL="${KERNEL:-$(uname -r)}"
-IPU6_DRIVERS="${IPU6_DRIVERS:-$HOME/src/gc2607-camera/ipu6-drivers}"
+IPU6_DRIVERS="${IPU6_DRIVERS:-$ROOT/third_party/ipu6-drivers}"
 DKMS_NAME="${DKMS_NAME:-ipu6-drivers}"
 DKMS_VERSION="${DKMS_VERSION:-0.0.0}"
 DKMS_SOURCE_DIR="/usr/src/${DKMS_NAME}-${DKMS_VERSION}"
@@ -21,7 +21,7 @@ if [[ ! -f "$IPU6_DRIVERS/dkms.conf" ]]; then
 Missing ipu6-drivers DKMS source:
   $IPU6_DRIVERS/dkms.conf
 
-Clone Intel's ipu6-drivers repository first, or set IPU6_DRIVERS=/path/to/ipu6-drivers.
+Run "$ROOT/scripts/clone-sources.sh" first, or set IPU6_DRIVERS=/path/to/ipu6-drivers.
 EOF
     exit 1
 fi
