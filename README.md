@@ -17,6 +17,10 @@ GC2607 sensor
 
 The checkpoint here is the kernel and HAL stack plus a known-good GStreamer validation path.
 
+Example image taken with the webcam in suboptimal lightning (evening) 
+![Example](./assets/gc2607-frame-29.jpg)
+
+
 ## Credits
 
 This work builds on the initial GC2607 Linux V4L2 driver project:
