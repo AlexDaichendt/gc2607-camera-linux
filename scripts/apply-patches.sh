@@ -42,6 +42,7 @@ apply_patch_once() {
 apply_patch_once "$DRIVER" "$BRINGUP/patches/driver/0001-gc2607-controls-timing-for-ipu6.patch"
 apply_patch_once "$HAL" "$BRINGUP/patches/hal/0001-gc2607-profile-and-psys-padding.patch"
 apply_patch_once "$HAL" "$BRINGUP/patches/hal/0002-add-gc2607-sensor-xml.patch"
+apply_patch_once "$HAL" "$BRINGUP/patches/hal/0003-relax-werror-for-newer-toolchains.patch"
 apply_patch_once "$IPU6_DRIVERS" "$BRINGUP/patches/ipu6-drivers/0001-cio2-bridge-add-gc2607-sensor.patch"
 
 "$BRINGUP/scripts/install-hal-assets.sh" "$HAL"

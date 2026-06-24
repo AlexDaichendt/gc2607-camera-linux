@@ -15,16 +15,24 @@ EOF
     exit 1
 fi
 
-for file in gc2607.c Makefile dkms.conf; do
-    if [[ ! -f "$DRIVER/$file" ]]; then
-        echo "Missing $DRIVER/$file" >&2
+# The upstream driver tree does not ship a dkms.conf. Prefer one from the driver
+# tree if it exists, otherwise fall back to the dkms.conf bundled with this repo.
+DKMS_CONF="${DKMS_CONF:-$DRIVER/dkms.conf}"
+if [[ ! -f "$DKMS_CONF" ]]; then
+    DKMS_CONF="$ROOT/config/dkms/gc2607-dkms.conf"
+fi
+
+for file in "$DRIVER/gc2607.c" "$DRIVER/Makefile" "$DKMS_CONF"; do
+    if [[ ! -f "$file" ]]; then
+        echo "Missing $file" >&2
         echo "Clone and patch the GC2607 driver repo first, or set DRIVER=/path/to/gc2607-v4l2-driver." >&2
         exit 1
     fi
 done
 
 install -d "$SOURCE_DIR"
-install -m 0644 "$DRIVER/gc2607.c" "$DRIVER/Makefile" "$DRIVER/dkms.conf" "$SOURCE_DIR/"
+install -m 0644 "$DRIVER/gc2607.c" "$DRIVER/Makefile" "$SOURCE_DIR/"
+install -m 0644 "$DKMS_CONF" "$SOURCE_DIR/dkms.conf"
 install -D -m 0644 "$ROOT/config/modules-load.d/gc2607.conf" /etc/modules-load.d/gc2607.conf
 
 if ! dkms status -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION" >/dev/null 2>&1; then
