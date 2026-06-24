@@ -142,6 +142,30 @@ GC2607_FLIP_METHOD=rotate-180
 Set `GC2607_FLIP_METHOD=identity` when running `scripts/capture-gst-frame.sh` if your panel mounts
 the sensor in the opposite orientation.
 
+## HAL Build Fails With -Werror On Newer Toolchains
+
+On newer GCC/Clang releases the Intel `ipu6-camera-hal` tree fails to build because it
+compiles with `-Werror` and the source trips newer warnings such as
+`-Wunused-but-set-variable`, e.g.:
+
+```text
+error: variable 'i' set but not used [-Werror=unused-but-set-variable=]
+```
+
+`patches/hal/0003-relax-werror-for-newer-toolchains.patch` (applied by
+`scripts/apply-patches.sh`) adds `-Wno-error` so warnings stay warnings. If you build the
+HAL without that patch, pass the flag manually instead:
+
+```sh
+cmake -S . -B build-gc2607 -DCMAKE_CXX_FLAGS="-Wno-error" ...
+```
+
+## GC2607 DKMS Build Complains About A Missing dkms.conf
+
+The upstream `gc2607-v4l2-driver` tree does not ship a `dkms.conf`. This repo bundles one at
+`config/dkms/gc2607-dkms.conf`, and `scripts/install-gc2607-dkms.sh` falls back to it
+automatically. Override with `DKMS_CONF=/path/to/dkms.conf` if you maintain your own.
+
 ## Raw Capture Works But HAL Does Not
 
 If `docs/direct-raw.md` works but `icamerasrc` fails, focus on:
