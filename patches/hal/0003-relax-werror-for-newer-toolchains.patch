@@ -1,0 +1,12 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index be3d45a..33fffed 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -74,6 +74,7 @@ set (CMAKE_CXX_STANDARD 11)
+ add_compile_options(
+     -Wall
+     -Werror
++    -Wno-error
+     -fstack-protector
+     -fPIE
+     -fPIC
