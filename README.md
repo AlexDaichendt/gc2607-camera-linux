@@ -160,6 +160,13 @@ out-of-tree bridge builds. On current kernels where `modinfo ipu-bridge` points
 at the distro kernel module, rebuild or override that kernel module with the
 same entry. See `docs/ipu-bridge.md`.
 
+Because the stock bridge is replaced on every kernel upgrade, install the pacman
+hook that rebuilds the override automatically (Arch):
+
+```sh
+"$BRINGUP/scripts/install-ipu-bridge-hook.sh"
+```
+
 Install boot-time module loading and `/dev/ipu-psys0` permissions:
 
 ```sh

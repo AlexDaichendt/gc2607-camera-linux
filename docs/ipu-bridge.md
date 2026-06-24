@@ -80,6 +80,49 @@ a local override module for the exact `uname -r`. The module must match the runn
 The old helper scripts in `third_party/gc2607-v4l2-driver` are useful as historical notes, but they
 are hardcoded for an older Arch kernel. Do not run them directly on a different kernel release.
 
+## Auto-Rebuild On Kernel Upgrade (Arch)
+
+The stock in-tree `ipu-bridge` lacks the `GCTI2607` entry, so **every kernel upgrade replaces the
+running bridge with one that does not know about the GC2607 and the camera silently stops working**
+until the override is rebuilt. The DKMS sensor module rebuilds itself on upgrade, but the bridge
+override does not — it is not a DKMS package.
+
+To rebuild the override automatically, install the pacman hook:
+
+```sh
+scripts/install-ipu-bridge-hook.sh
+```
+
+This installs:
+
+```text
+/usr/local/lib/gc2607/rebuild-ipu-bridge-override.sh   rebuild logic
+/usr/local/lib/gc2607/ipu-bridge.c                     vendored fallback source
+/etc/pacman.d/hooks/90-gc2607-ipu-bridge.hook          PostTransaction trigger
+```
+
+On every kernel install/upgrade, the hook runs `rebuild-ipu-bridge-override.sh --pacman-targets`,
+which for each updated kernel:
+
+1. skips if a current override is already installed (`GCTI2607` present and vermagic matches);
+2. otherwise compiles `bridge/ipu-bridge.c` (vendored, with the `GCTI2607` entry inserted
+   idempotently) against that kernel's `build/` headers;
+3. if the vendored source does not match a newer kernel's bridge ABI, fetches the matching-version
+   `ipu-bridge.c` from `git.kernel.org` and retries;
+4. signs the module with the DKMS MOK (if present) and installs it to
+   `/lib/modules/<kver>/updates/ipu-bridge.ko`, then runs `depmod`.
+
+The rebuild requires that kernel's `linux-headers` to be installed; if they are missing the hook
+prints a warning and skips that kernel. You can also rebuild manually at any time:
+
+```sh
+sudo scripts/rebuild-ipu-bridge-override.sh            # current kernel
+sudo scripts/rebuild-ipu-bridge-override.sh 7.0.11-arch1-1
+```
+
+> Note: the override stages in `updates/`. A reboot brings up the new bridge and sensor in the
+> correct order; the camera may not bind until then.
+
 ## Check The Running Module
 
 Confirm which bridge module is loaded from disk:

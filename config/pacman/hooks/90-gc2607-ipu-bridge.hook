@@ -1,0 +1,16 @@
+# Rebuild the GC2607 ipu-bridge override whenever a kernel is installed/upgraded.
+# Without this, every kernel bump ships a stock ipu-bridge that lacks the
+# GCTI2607 sensor entry, and the camera silently stops working until the
+# override is rebuilt by hand. Installed by scripts/install-ipu-bridge-hook.sh.
+
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Target = usr/lib/modules/*/pkgbase
+
+[Action]
+Description = Rebuilding GC2607 ipu-bridge override for updated kernel(s)...
+When = PostTransaction
+NeedsTargets
+Exec = /bin/sh -c '/usr/local/lib/gc2607/rebuild-ipu-bridge-override.sh --pacman-targets || echo "gc2607: ipu-bridge override rebuild failed; camera may need a manual rebuild" >&2'
