@@ -52,6 +52,39 @@ camera, the watcher waits `GC2607_VCAM_IDLE_SECONDS` seconds and stops the real 
 The idle standby stream is cheap but not free: it keeps a small GStreamer `videotestsrc` pipeline
 running so apps can discover the camera. Run `stop` when you want zero virtual-camera helper CPU.
 
+## Persistence Across Reboots
+
+The manual workflow above does not survive a reboot: `v4l2loopback` is not loaded, `/dev/video60`
+does not exist, and the watcher is not armed until you run `start` again. If you reboot and join a
+call before remembering to do that, the camera is simply missing.
+
+To wire it up once and have it come back automatically on every boot:
+
+```sh
+"$BRINGUP/scripts/install-virtual-camera-service.sh"
+```
+
+This is re-runnable and installs three idempotent pieces:
+
+1. `/etc/modules-load.d` + `/etc/modprobe.d` drop-ins so `v4l2loopback` auto-loads at boot with the
+   GC2607 options, making `/dev/video60` exist before you log in (asks for `sudo`).
+2. A `systemd --user` service (`gc2607-camera.service`) that runs `virtual-camera.sh
+   watch-foreground` on login, ordered after `pipewire`/`wireplumber`.
+3. The WirePlumber desktop integration (via `install-virtual-camera-desktop.sh`).
+
+This persists the *virtual device and the on-demand watcher* — not the real camera. The standby
+stream keeps `/dev/video60` discoverable, and the real GC2607/IPU6 pipeline still only spins up
+while an app is actually using the virtual camera, exactly as with the manual `start` flow. The
+service is `--user` (no `loginctl enable-linger`) because the watcher needs the graphical session's
+PipeWire stack, which only exists once you are logged in.
+
+Undo it by disabling the service and removing the drop-ins:
+
+```sh
+systemctl --user disable --now gc2607-camera.service
+sudo rm -f /etc/modules-load.d/gc2607-v4l2loopback.conf /etc/modprobe.d/gc2607-v4l2loopback.conf
+```
+
 ## Status And Logs
 
 ```sh
