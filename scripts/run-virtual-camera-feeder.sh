@@ -12,6 +12,19 @@ FRAMERATE="${GC2607_VCAM_FRAMERATE:-30/1}"
 FORMAT="${GC2607_VCAM_FORMAT:-YUY2}"
 FLIP_METHOD="${GC2607_FLIP_METHOD:-rotate-180}"
 
+# Exposure control. The IPU6 HAL's auto-exposure hunts (brightness pumps up and
+# down) as the scene changes, e.g. when a face enters the frame. Lock it to a
+# fixed manual exposure by default so the picture stays steady. Override any of
+# these via the environment; set GC2607_AE_MODE=auto to restore auto-exposure.
+AE_MODE="${GC2607_AE_MODE:-manual}"
+EXPOSURE_TIME="${GC2607_EXPOSURE_TIME:-22000}"   # microseconds (0-1000000)
+GAIN="${GC2607_GAIN:-10}"                        # dB (0-100), manual AE only
+
+AE_PROPS=("ae-mode=$AE_MODE")
+if [[ "$AE_MODE" == "manual" ]]; then
+    AE_PROPS+=("exposure-time=$EXPOSURE_TIME" "gain=$GAIN")
+fi
+
 if [[ ! -d "$PREFIX" ]]; then
     echo "Missing HAL prefix: $PREFIX" >&2
     exit 1
@@ -34,7 +47,7 @@ export GST_PLUGIN_PATH="$PREFIX/lib/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN
 export GST_REGISTRY="${GST_REGISTRY:-$PREFIX/gstreamer-registry.bin}"
 
 exec gst-launch-1.0 -e \
-    icamerasrc device-name=gc2607-uf \
+    icamerasrc device-name=gc2607-uf "${AE_PROPS[@]}" \
     ! "video/x-raw,format=NV12,width=${SOURCE_WIDTH},height=${SOURCE_HEIGHT},framerate=${FRAMERATE}" \
     ! videoflip method="$FLIP_METHOD" \
     ! videoconvert \
