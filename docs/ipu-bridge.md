@@ -11,6 +11,25 @@ IPU_SENSOR_CONFIG("GCTI2607", 1, 336000000),
 `GCTI2607` is the ACPI HID exposed by the firmware, `1` is the number of link frequencies, and
 `336000000` is the 336 MHz link frequency used by the GC2607 driver patch.
 
+## Preferred Fix: DKMS Override (ipu-bridge-gc2607)
+
+The repo ships a standalone DKMS module under `ipu-bridge-gc2607/` that builds a
+patched `ipu-bridge.ko` and installs it to `updates/dkms/` where it takes priority
+over the distro-supplied copy. `AUTOINSTALL=yes` means it rebuilds automatically on
+every kernel upgrade, so the entry survives future bumps.
+
+```sh
+sudo ./scripts/install-ipu-bridge-dkms.sh          # build + install
+sudo ./scripts/install-ipu-bridge-dkms.sh --reload # build + install + hot-reload modules
+```
+
+Verify after reload:
+
+```sh
+zstd -d -c /lib/modules/"$(uname -r)"/updates/dkms/ipu-bridge.ko.zst | strings | grep GCTI2607
+media-ctl --print-topology | grep -i gc2607
+```
+
 ## Which Source Needs The Entry?
 
 There are two cases:
