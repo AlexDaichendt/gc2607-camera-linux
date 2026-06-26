@@ -17,9 +17,64 @@ GC2607 sensor
 
 The checkpoint here is the kernel and HAL stack plus a known-good GStreamer validation path.
 
+## Architecture
+
+How the pieces fit together. `[P]` marks a component this repo patches, `[A]` an asset
+or config this repo ships, and `[D]` a module installed via DKMS. Solid arrows are the
+frame data path; `~~~` arrows are I2C/ACPI control and power.
+
+```text
+                              HARDWARE
+  +-----------------------------------------------------------------+
+  |   GalaxyCore GC2607 sensor            INT3472 PMIC              |
+  |   ACPI HID: GCTI2607                  (power / reset / clk)     |
+  +----------+--------------------------------+---------------------+
+             | MIPI CSI-2                      ~ I2C + GPIO ~
+             | SGRBG10 1920x1080               ~ (ACPI _CRS) ~
+             v                                 v
+  ===================================  KERNEL  =======================
+  |                                                                  |
+  |   gc2607 V4L2 subdev driver  [P][D]   <~~ binds to i2c-GCTI2607  |
+  |   (third_party/gc2607-v4l2-driver)        via ACPI HID match     |
+  |          |                                        ^              |
+  |          | registers v4l2_subdev                  |              |
+  |          v                                        |              |
+  |   ipu-bridge  [P]  --- builds the software-node camera graph ----+
+  |   (in-tree kmod + GCTI2607 sensor-table entry; see below)        |
+  |          |                                                       |
+  |          v                                                       |
+  |   intel-ipu6 / intel-ipu6-isys  --- ISYS raw CSI-2 capture       |
+  |          |                                                       |
+  |          v                                                       |
+  |   intel-ipu6-psys  [D]  --- PSYS image-processing device         |
+  |   (third_party/ipu6-drivers)          exposes /dev/ipu-psys0     |
+  |          |                                                       |
+  +----------|--------------- /dev/video* + /dev/ipu-psys0 ----------+
+             |
+  =============================  USERSPACE  =========================
+  |          v                                                      |
+  |   Intel IPU6 HAL / libcamhal  [P]  +  PSYS pipeline             |
+  |   (third_party/ipu6-camera-hal)                                 |
+  |        uses:  gc2607 AIQB + graph XML  [A] (assets/hal/)        |
+  |          |                                                      |
+  |          v   processed NV12 1920x1080 @ 30fps                   |
+  |   icamerasrc  (GStreamer source: device-name=gc2607-uf)         |
+  |          |                                                      |
+  |          v                                                      |
+  |   GStreamer pipeline (verify-hal.sh / capture-gst-frame.sh)     |
+  |          |                                                      |
+  |          +--> JPEG / raw frame capture                          |
+  |          |                                                      |
+  |          v   (optional) feeder -> v4l2loopback                  |
+  |   GC2607 Virtual Camera  /dev/video60  (virtual-camera.sh)      |
+  |          |                                                      |
+  |          v                                                      |
+  |   Apps: Discord / Telegram / browser WebRTC                     |
+  +-----------------------------------------------------------------+
+```
+
 Example image taken with the webcam in suboptimal lightning (evening) 
 ![Example](./assets/gc2607-frame-29.jpg)
-
 
 ## Credits
 
