@@ -77,8 +77,9 @@ IPU_SENSOR_CONFIG("GCTI2607", 1, 336000000),
 Then rebuild and install that kernel module using the distro's normal kernel packaging flow, or build
 a local override module for the exact `uname -r`. The module must match the running kernel vermagic.
 
-The old helper scripts in `third_party/gc2607-v4l2-driver` are useful as historical notes, but they
-are hardcoded for an older Arch kernel. Do not run them directly on a different kernel release.
+The original bring-up project (https://github.com/abbood/gc2607-v4l2-driver) shipped helper scripts
+for this step that are useful as historical notes, but they are hardcoded for an older Arch kernel.
+Do not run them directly on a different kernel release.
 
 ## Check The Running Module
 

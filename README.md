@@ -19,9 +19,10 @@ The checkpoint here is the kernel and HAL stack plus a known-good GStreamer vali
 
 ## Architecture
 
-How the pieces fit together. `[P]` marks a component this repo patches, `[A]` an asset
-or config this repo ships, and `[D]` a module installed via DKMS. Solid arrows are the
-frame data path; `~~~` arrows are I2C/ACPI control and power.
+How the pieces fit together. `[P]` marks a component this repo patches, `[S]` a
+component whose source this repo ships in-tree, `[A]` an asset or config this repo
+ships, and `[D]` a module installed via DKMS. Solid arrows are the frame data path;
+`~~~` arrows are I2C/ACPI control and power.
 
 ```text
                               HARDWARE
@@ -34,8 +35,8 @@ frame data path; `~~~` arrows are I2C/ACPI control and power.
              v                                 v
   ===================================  KERNEL  =======================
   |                                                                  |
-  |   gc2607 V4L2 subdev driver  [P][D]   <~~ binds to i2c-GCTI2607  |
-  |   (third_party/gc2607-v4l2-driver)        via ACPI HID match     |
+  |   gc2607 V4L2 subdev driver  [S][D]   <~~ binds to i2c-GCTI2607  |
+  |   (gc2607-kernel/)                         via ACPI HID match     |
   |          |                                        ^              |
   |          | registers v4l2_subdev                  |              |
   |          v                                        |              |
@@ -110,12 +111,15 @@ The tested system exposes the sensor as `i2c-GCTI2607:00`.
 assets/hal/       GC2607 AIQB and graph XML used by the HAL pipeline
 config/           boot-time module and udev configuration
 docs/             asset checksums, raw capture, and troubleshooting notes
-patches/driver/   patch for the GC2607 V4L2 driver
+gc2607-kernel/    in-tree GC2607 V4L2 sensor driver source (built via DKMS)
+patches/driver/   historical diff for the GC2607 driver, now baked into
+                  gc2607-kernel/ (kept for reference only)
 patches/hal/      patches for Intel ipu6-camera-hal
 patches/ipu6-drivers/
                   patch for the older out-of-tree IPU bridge table
 scripts/          clone, patch, install, and validation scripts
-third_party/      upstream source repos tracked as git submodules
+third_party/      upstream ipu6-camera-hal and ipu6-drivers, tracked as
+                  git submodules
 ```
 
 ## Required Sources
@@ -137,10 +141,13 @@ The examples below assume:
 
 ```sh
 export BRINGUP="$PWD"
-export DRIVER="$BRINGUP/third_party/gc2607-v4l2-driver"
+export DRIVER="$BRINGUP/gc2607-kernel"
 export HAL="$BRINGUP/third_party/ipu6-camera-hal"
 export IPU6_DRIVERS="$BRINGUP/third_party/ipu6-drivers"
 ```
+
+The GC2607 driver source lives in-tree under `gc2607-kernel/`; only the HAL and
+`ipu6-drivers` come from the third-party submodules.
 
 ## Dependencies
 
@@ -170,15 +177,15 @@ Automatic:
 "$BRINGUP/scripts/apply-patches.sh"
 ```
 
-Manual equivalent:
+Manual equivalent (the GC2607 driver in `gc2607-kernel/` needs no patching — its
+source already carries the timing/control fixes; only the third-party HAL and
+`ipu6-drivers` submodules are patched):
 
 ```sh
-cd "$DRIVER"
-git apply "$BRINGUP/patches/driver/0001-gc2607-controls-timing-for-ipu6.patch"
-
 cd "$HAL"
 git apply "$BRINGUP/patches/hal/0001-gc2607-profile-and-psys-padding.patch"
 git apply "$BRINGUP/patches/hal/0002-add-gc2607-sensor-xml.patch"
+git apply "$BRINGUP/patches/hal/0003-relax-werror-for-newer-toolchains.patch"
 "$BRINGUP/scripts/install-hal-assets.sh" "$HAL"
 
 cd "$IPU6_DRIVERS"
