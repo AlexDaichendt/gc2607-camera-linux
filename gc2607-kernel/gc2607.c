@@ -50,12 +50,17 @@
 #define GC2607_GAIN_DEFAULT		14	/* LUT index 14 = ~10x gain */
 
 /* Sensor timing - modified for better low-light performance */
-#define GC2607_PIXEL_RATE		(672000000LL / 10 * 2)  /* 134.4 MHz */
+/* Sensor readout pixel rate = HTS x VTS x fps (used by HAL 3A for frame
+ * duration + exposure<->time conversion). NOT the MIPI bus rate.
+ */
+#define GC2607_PIXEL_RATE		((s64)GC2607_HTS * GC2607_VTS * 30)  /* ~65.6 MHz */
 #define GC2607_LINK_FREQ		336000000LL  /* 672 Mbps / 2 lanes */
 #define GC2607_HTS			1959  /* tight h-blank for 30fps at stock 65.6MHz sclk */
 #define GC2607_VTS			1116  /* min frame length (1080+20+16) -> 30.0 fps */
 #define GC2607_WIDTH			1920
 #define GC2607_HEIGHT			1080
+#define GC2607_HBLANK			(GC2607_HTS - GC2607_WIDTH)   /* 39, llp=width+hblank */
+#define GC2607_VBLANK			(GC2607_VTS - GC2607_HEIGHT)  /* 36, fll=height+vblank */
 
 /*
  * PLL / timing sweep overrides (experimental, branch: pll-sweep)
@@ -837,6 +842,7 @@ static int gc2607_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	struct gc2607 *gc2607;
+	struct v4l2_ctrl *ctrl;
 	int ret;
 
 	dev_info(dev, "GC2607 probe started\n");
@@ -922,7 +928,7 @@ static int gc2607_probe(struct i2c_client *client)
 	}
 
 	/* Initialize control handler with V4L2 controls */
-	v4l2_ctrl_handler_init(&gc2607->ctrls, 4);
+	v4l2_ctrl_handler_init(&gc2607->ctrls, 6);
 
 	/* Link frequency control (required by IPU6) */
 	gc2607->link_freq = v4l2_ctrl_new_int_menu(&gc2607->ctrls,
@@ -944,6 +950,19 @@ static int gc2607_probe(struct i2c_client *client)
 						GC2607_PIXEL_RATE);
 	if (gc2607->pixel_rate)
 		gc2607->pixel_rate->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+
+	/* HBLANK / VBLANK: read-only frame timing for the HAL 3A (llp/fll).
+	 * Fixed because the mode runs near-minimum blanking (see FINDINGS.md).
+	 */
+	ctrl = v4l2_ctrl_new_std(&gc2607->ctrls, NULL, V4L2_CID_HBLANK,
+				 GC2607_HBLANK, GC2607_HBLANK, 1, GC2607_HBLANK);
+	if (ctrl)
+		ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+
+	ctrl = v4l2_ctrl_new_std(&gc2607->ctrls, NULL, V4L2_CID_VBLANK,
+				 GC2607_VBLANK, GC2607_VBLANK, 1, GC2607_VBLANK);
+	if (ctrl)
+		ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
 	/* Exposure control */
 	gc2607->exposure = v4l2_ctrl_new_std(&gc2607->ctrls,
