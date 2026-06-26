@@ -43,11 +43,30 @@
 #define GC2607_EXPOSURE_STEP		1
 #define GC2607_EXPOSURE_DEFAULT		1000	/* indoor default, < VTS */
 
-/* Gain is controlled via LUT index (0-16), not raw register values */
-#define GC2607_GAIN_MIN			0	/* LUT index 0 = 1.0x gain */
-#define GC2607_GAIN_MAX			16	/* LUT index 16 = 15.8x gain */
-#define GC2607_GAIN_STEP		1	/* One LUT entry at a time */
-#define GC2607_GAIN_DEFAULT		14	/* LUT index 14 = ~10x gain */
+/* Analog gain: V4L2_CID_ANALOGUE_GAIN is in 1/64 units to match the IPU6
+ * tuning (gc2607_gc2607_MTL.aiqb). Its CMC describes analog gain as
+ * real_gain = code / 64 (SMIA M0=1 C0=0 M1=0 C1=64), so the AIQ always emits
+ * codes >= 64. The again table below realizes discrete steps from 1.0x
+ * (code 64) up to 15.8125x (code 1012) via regs 0x02b3/0x02b4 plus the
+ * 0x020c/0x020d fine-trim; s_ctrl selects the highest entry whose code does
+ * not exceed the requested value.
+ */
+#define GC2607_ANA_GAIN_MIN		64	/* 1.0x (64/64) */
+#define GC2607_ANA_GAIN_MAX		1012	/* 15.8125x = again-LUT ceiling */
+#define GC2607_ANA_GAIN_STEP		1
+#define GC2607_ANA_GAIN_DEFAULT		64	/* 1.0x; AE raises it as needed */
+
+/* Digital gain: the .aiqb CMC fixes sensor digital gain at 1.0x (code 256 in
+ * 1/256 units, min == max). The sensor has no usable standalone digital-gain
+ * register (0x020c/0x020d are consumed by the analog fine-trim above), so this
+ * control exists only to satisfy the HAL, which writes V4L2_CID_DIGITAL_GAIN
+ * (and conditionally V4L2_CID_GAIN) every frame. Without it the v4l2 framework
+ * returns EINVAL on each write (the SetControl spam seen in the HAL log).
+ */
+#define GC2607_DIG_GAIN_MIN		256	/* 1.0x (256/256) */
+#define GC2607_DIG_GAIN_MAX		256
+#define GC2607_DIG_GAIN_STEP		1
+#define GC2607_DIG_GAIN_DEFAULT		256
 
 /* Sensor timing - modified for better low-light performance */
 /* Sensor readout pixel rate = HTS x VTS x fps (used by HAL 3A for frame
@@ -116,39 +135,60 @@ struct gc2607_regval {
 	u8 val;
 };
 
-/* Gain lookup table entry - from reference driver */
+/* Gain lookup table entry. The again pipeline uses four registers together
+ * (0x02b3/0x02b4 analog stage + 0x020c/0x020d digital fine-trim); 'code' is the
+ * realized analog gain in 1/64 units (= real_gain * 64), matching the units the
+ * IPU6 AIQ writes to V4L2_CID_ANALOGUE_GAIN.
+ */
 struct gc2607_gain_lut {
 	u8 reg2b3;
 	u8 reg2b4;
 	u8 reg20c;
 	u8 reg20d;
+	u16 code;
 };
 
-/* Gain lookup table for optimal noise performance
- * Using 4 registers together provides better image quality than single register
- * Table from reference driver - maps gain levels to register combinations
+/* Register combinations from the GalaxyCore reference again table. The 'code'
+ * column is the original real-gain figure expressed in 1/64 units, so the table
+ * is indexed by the AIQ's analog_gain_code_global rather than a 0-16 index.
  */
 static const struct gc2607_gain_lut gc2607_gain_table[] = {
-	{0x00, 0x00, 0x00, 0x40},  /* Gain index 0  - lowest gain */
-	{0x05, 0x00, 0x00, 0x4b},  /* Gain index 1 */
-	{0x00, 0x01, 0x00, 0x59},  /* Gain index 2 */
-	{0x05, 0x01, 0x00, 0x6a},  /* Gain index 3 */
-	{0x00, 0x02, 0x00, 0x80},  /* Gain index 4 */
-	{0x05, 0x02, 0x00, 0x97},  /* Gain index 5 */
-	{0x00, 0x03, 0x00, 0xb3},  /* Gain index 6 */
-	{0x05, 0x03, 0x00, 0xd4},  /* Gain index 7 */
-	{0x00, 0x04, 0x01, 0x00},  /* Gain index 8 */
-	{0x05, 0x04, 0x01, 0x2f},  /* Gain index 9 */
-	{0x00, 0x05, 0x01, 0x66},  /* Gain index 10 */
-	{0x05, 0x05, 0x01, 0xa8},  /* Gain index 11 */
-	{0x00, 0x06, 0x02, 0x00},  /* Gain index 12 */
-	{0x05, 0x06, 0x02, 0x5e},  /* Gain index 13 */
-	{0x09, 0x26, 0x02, 0xcc},  /* Gain index 14 */
-	{0x0c, 0xb6, 0x03, 0x50},  /* Gain index 15 */
-	{0x10, 0x06, 0x04, 0x00},  /* Gain index 16 - highest gain */
+	{0x00, 0x00, 0x00, 0x40,   64},  /* 1.0000x */
+	{0x05, 0x00, 0x00, 0x4b,   76},  /* 1.1875x */
+	{0x00, 0x01, 0x00, 0x59,   93},  /* 1.4531x */
+	{0x05, 0x01, 0x00, 0x6a,  111},  /* 1.7344x */
+	{0x00, 0x02, 0x00, 0x80,  130},  /* 2.0313x */
+	{0x05, 0x02, 0x00, 0x97,  156},  /* 2.4375x */
+	{0x00, 0x03, 0x00, 0xb3,  184},  /* 2.8750x */
+	{0x05, 0x03, 0x00, 0xd4,  221},  /* 3.4531x */
+	{0x00, 0x04, 0x01, 0x00,  253},  /* 3.9531x */
+	{0x05, 0x04, 0x01, 0x2f,  304},  /* 4.7500x */
+	{0x00, 0x05, 0x01, 0x66,  367},  /* 5.7344x */
+	{0x05, 0x05, 0x01, 0xa8,  434},  /* 6.7813x */
+	{0x00, 0x06, 0x02, 0x00,  510},  /* 7.9688x */
+	{0x05, 0x06, 0x02, 0x5e,  607},  /* 9.4844x */
+	{0x09, 0x26, 0x02, 0xcc,  717},  /* 11.2031x */
+	{0x0c, 0xb6, 0x03, 0x50,  847},  /* 13.2344x */
+	{0x10, 0x06, 0x04, 0x00, 1012},  /* 15.8125x - highest gain */
 };
 
 #define GC2607_GAIN_TABLE_SIZE ARRAY_SIZE(gc2607_gain_table)
+
+/* Map a requested analog gain code (1/64 units) to the highest again table
+ * entry whose realized gain does not exceed it (SMIA-style round-down, matching
+ * the GalaxyCore reference alloc_again). Codes below the first entry clamp to
+ * 1.0x; the control range already bounds the upper end.
+ */
+static const struct gc2607_gain_lut *gc2607_again_for_code(u32 code)
+{
+	int i;
+
+	for (i = GC2607_GAIN_TABLE_SIZE - 1; i >= 0; i--)
+		if (code >= gc2607_gain_table[i].code)
+			return &gc2607_gain_table[i];
+
+	return &gc2607_gain_table[0];
+}
 
 /* Sensor mode structure */
 struct gc2607_mode {
@@ -171,6 +211,7 @@ struct gc2607 {
 	struct v4l2_ctrl *pixel_rate;
 	struct v4l2_ctrl *exposure;
 	struct v4l2_ctrl *gain;
+	struct v4l2_ctrl *digital_gain;
 	struct v4l2_ctrl *vblank;
 
 	/* Power management resources (provided by INT3472 PMIC) */
@@ -745,29 +786,33 @@ static int gc2607_s_ctrl(struct v4l2_ctrl *ctrl)
 			dev_dbg(&client->dev, "Set exposure to %d\n", ctrl->val);
 		break;
 
-	case V4L2_CID_ANALOGUE_GAIN:
-		/* Always use the calibrated LUT for optimal noise performance.
-		 * ctrl->val is LUT index (0-16), not raw register value.
+	case V4L2_CID_ANALOGUE_GAIN: {
+		/* ctrl->val is an analog gain code in 1/64 units (real_gain * 64),
+		 * as produced by the IPU6 AIQ. Round down to the nearest realizable
+		 * again table entry and program its four registers.
 		 */
-		if (ctrl->val < 0 || ctrl->val >= GC2607_GAIN_TABLE_SIZE) {
-			dev_err(&client->dev, "Invalid gain LUT index %d\n", ctrl->val);
-			ret = -EINVAL;
-			break;
-		}
+		const struct gc2607_gain_lut *lut = gc2607_again_for_code(ctrl->val);
 
-		/* Get calibrated register values from LUT */
-		{
-			const struct gc2607_gain_lut *lut = &gc2607_gain_table[ctrl->val];
+		ret = gc2607_write_reg(gc2607, GC2607_REG_AGAIN_H, lut->reg2b3);
+		if (!ret) ret = gc2607_write_reg(gc2607, GC2607_REG_AGAIN_L, lut->reg2b4);
+		if (!ret) ret = gc2607_write_reg(gc2607, GC2607_REG_DGAIN_H, lut->reg20c);
+		if (!ret) ret = gc2607_write_reg(gc2607, GC2607_REG_DGAIN_L, lut->reg20d);
 
-			/* Write all 4 gain registers for proper calibration */
-			ret = gc2607_write_reg(gc2607, GC2607_REG_AGAIN_H, lut->reg2b3);
-			if (!ret) ret = gc2607_write_reg(gc2607, GC2607_REG_AGAIN_L, lut->reg2b4);
-			if (!ret) ret = gc2607_write_reg(gc2607, GC2607_REG_DGAIN_H, lut->reg20c);
-			if (!ret) ret = gc2607_write_reg(gc2607, GC2607_REG_DGAIN_L, lut->reg20d);
+		if (!ret)
+			dev_dbg(&client->dev,
+				"analog gain code %d -> %u/64x (regs %02x %02x %02x %02x)\n",
+				ctrl->val, lut->code, lut->reg2b3, lut->reg2b4,
+				lut->reg20c, lut->reg20d);
+		break;
+	}
 
-			if (!ret)
-				dev_dbg(&client->dev, "Set gain to LUT index %d\n", ctrl->val);
-		}
+	case V4L2_CID_DIGITAL_GAIN:
+	case V4L2_CID_GAIN:
+		/* Sensor digital gain is fixed at 1.0x in the .aiqb tuning, and the
+		 * sensor has no standalone digital-gain register to drive. Accept the
+		 * control (the HAL writes it every frame) without touching hardware so
+		 * the framework stops returning EINVAL.
+		 */
 		break;
 
 	default:
@@ -999,14 +1044,25 @@ static int gc2607_probe(struct i2c_client *client)
 					      GC2607_EXPOSURE_STEP,
 					      GC2607_EXPOSURE_DEFAULT);
 
-	/* Analog gain control */
+	/* Analog gain control (1/64 units, matches the .aiqb CMC) */
 	gc2607->gain = v4l2_ctrl_new_std(&gc2607->ctrls,
 					  &gc2607_ctrl_ops,
 					  V4L2_CID_ANALOGUE_GAIN,
-					  GC2607_GAIN_MIN,
-					  GC2607_GAIN_MAX,
-					  GC2607_GAIN_STEP,
-					  GC2607_GAIN_DEFAULT);
+					  GC2607_ANA_GAIN_MIN,
+					  GC2607_ANA_GAIN_MAX,
+					  GC2607_ANA_GAIN_STEP,
+					  GC2607_ANA_GAIN_DEFAULT);
+
+	/* Digital gain control: fixed at 1.0x per the .aiqb, exposed only so the
+	 * HAL's per-frame V4L2_CID_DIGITAL_GAIN writes don't return EINVAL.
+	 */
+	gc2607->digital_gain = v4l2_ctrl_new_std(&gc2607->ctrls,
+						 &gc2607_ctrl_ops,
+						 V4L2_CID_DIGITAL_GAIN,
+						 GC2607_DIG_GAIN_MIN,
+						 GC2607_DIG_GAIN_MAX,
+						 GC2607_DIG_GAIN_STEP,
+						 GC2607_DIG_GAIN_DEFAULT);
 
 	gc2607->sd.ctrl_handler = &gc2607->ctrls;
 

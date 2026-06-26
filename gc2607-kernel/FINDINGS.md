@@ -193,73 +193,114 @@ Also repaired post-restructure breakage: `scripts/install-gc2607-dkms.sh`
 sourced from the deleted submodule (now `gc2607-kernel/`); `config/dkms/
 gc2607-dkms.conf` now builds with `LLVM=1` (clang kernel).
 
-## OPEN / IN PROGRESS: grainy images = gain-model mismatch
+## Fixed: grainy images = gain-model unit mismatch
 
-Current state: images work and auto-expose, but are **grainy in dim light**, and
-the HAL still logs `SetControl: /dev/v4l-subdev6 SetControl(int,int) error:
-Invalid argument` (~12x at start).
+Symptom: images auto-exposed but were **grainy in dim light**, and the HAL
+logged `SetControl: /dev/v4l-subdev6 SetControl(int,int) error: Invalid
+argument` (~12x at start).
 
-Root cause (confirmed): the IPU6 HAL drives gain through **three** controls —
-`third_party/ipu6-camera-hal/src/3a/SensorManager.cpp` calls `setAnalogGains()`
-and `setDigitalGains()`, and the subdev controls used across `src/` are:
+Two-part root cause:
+- The driver exposed **only `analogue_gain`, as a 0-16 LUT index**. The IPU6 HAL
+  writes the AIQ's `analog_gain_code_global` straight to `V4L2_CID_ANALOGUE_GAIN`
+  (`SensorHwCtrl::setAnalogGains`), and that code is in the units the
+  `gc2607_gc2607_MTL.aiqb` CMC defines — which are **way above 16** — so the v4l2
+  framework clamped every request to index 16 = 15.8x = **max analog gain,
+  permanently**. That pinned gain is the grain; AE could only pull exposure down.
+- `V4L2_CID_DIGITAL_GAIN` (written every frame by `setDigitalGains`) and the
+  conditional `V4L2_CID_GAIN` were unimplemented -> `EINVAL` per write = the spam.
 
-```
-V4L2_CID_ANALOGUE_GAIN, V4L2_CID_GAIN, V4L2_CID_DIGITAL_GAIN
-```
+### Gain model, reverse-engineered from the .aiqb CMC
 
-Our driver exposes **only `analogue_gain`, as a 0-16 LUT index** (`gc2607_gain_table`,
-17 entries mapping index -> regs 0x02b3/0x02b4 analog + 0x020c/0x020d digital):
-- `V4L2_CID_DIGITAL_GAIN` / `V4L2_CID_GAIN` are unimplemented -> framework
-  returns `EINVAL` -> that is the `SetControl Invalid argument` spam.
-- `V4L2_CID_ANALOGUE_GAIN` exists but in the WRONG units: the Windows-tuned
-  `gc2607_gc2607_MTL.aiqb` expects the gain code the **Windows driver** exposed
-  (raw again-register units). The AIQ's computed code is >> 16, so the v4l2
-  framework clamps it to index 16 = ~15.8x = **max analog gain, permanently** ->
-  that pinned max gain is the grain. AE can only pull exposure down (it does);
-  gain stays wide open.
+The authoritative units live in the CMC inside `gc2607_gc2607_MTL.aiqb` (CPFF /
+`ia_mkn` container; record stream at file off `0x50`; record header
+`{u32 size; u8 fmt; u8 key; u16 name_id}`; struct layouts from
+`~/opt/gc2607-ipu6/include/ipu6epmtl/ia_imaging/ia_cmc_types.h`). Decoded:
 
-(The framework silently CLAMPS out-of-range values for *registered* controls, so
-the EINVAL must come from *unregistered* control ids — i.e. digital_gain/gain,
-not from analogue_gain being out of range.)
+- **Analog gain** — `cmc_name_id_multi_gain_conversions` (34): one analog,
+  segment-type entry, SMIA coeffs **`M0=1 C0=0 M1=0 C1=64`** →
+  `real_gain = code / 64`. Range `code_min=64` (1.0x) .. `code_max=2240` (35.0x),
+  step 1. So **`V4L2_CID_ANALOGUE_GAIN` unit = 1/64**.
+- **Digital gain** — `cmc_name_id_digital_gain` (20): `min=max=256`,
+  `fraction_bits=8` → **fixed at 1.0x** (unit 1/256). The AIQ always writes
+  `digital_gain_global = 256`. The sensor has no usable standalone digital-gain
+  register (reference `set_digital_gain` is a no-op, `max_dgain=0`); 0x020c/0x020d
+  are the analog fine-trim consumed by the `again` table.
+- `cmc_name_id_analog_gain_conversion` (19) is the deprecated path and is empty.
 
-### TASK for the continuing agent: RE the gain model + rework gain controls
+The GalaxyCore `again` table (regs 0x02b3/0x02b4 analog + 0x020c/0x020d fine-trim,
+17 entries 1.0x..15.8125x) was recovered from git
+`343ca59^:gc2607-kernel/reference/gc2607.c`. Its real-gain values × 64 give the
+LUT's analog-gain codes: 64, 76, 93, 111, 130, 156, 184, 221, 253, 304, 367, 434,
+510, 607, 717, 847, 1012.
 
-Goal: replace the 0-16 LUT with standard `V4L2_CID_ANALOGUE_GAIN` +
-`V4L2_CID_DIGITAL_GAIN` in the register-code units the `.aiqb` expects, so the
-AIQ can actually turn gain down (and add digital gain) -> kills the grain and the
-EINVAL spam. Decision was made to do this "properly" (not a guessed linear map),
-because the units must match the fixed Windows `.aiqb`.
+Caveat on the reference table: its `gain` column is **not** linear — it is
+Ingenic T41 ISP units, `log2(real_gain) × 65536` (e.g. 1.1875x → 16247 ≈
+`log2(1.1875)·65536`; 15.8125x → 261029). The usable real-gain figures are the
+per-row comments (1.0, 1.1875, 1.453125, …, 15.8125), which is what `×64` above
+is applied to. `alloc_dgain` returns 0 / `max_dgain = 0`, confirming digital gain
+is unused in the reference — consistent with the CMC fixing it at 1.0x.
 
-Steps:
-1. **Extract the gain model from `gc2607.sys`** (the authoritative source for the
-   units the `.aiqb` was tuned against). Windows file lives at:
-   `~/Downloads/HUAWEI_..._Camera_IPU6_64.22000.13.14550/.../` -> the `.exe` is
-   NSIS; extract twice with `7z` to reach `camera/gc2607.sys` (+ `.aiqb`, INF,
-   graph_settings.xml). The init register table was decoded from `.rdata` @
-   file-offset `0x210c0`, 16-byte entries `{u32 flag,u32 addr,u32 val,u32 pad}`
-   (see `tools/win_gc2607_regs.txt`). Look for the **gain control descriptor /
-   gain LUT**: search the binary for the gain register addresses (0x02b3/0x02b4
-   analog, 0x020c/0x020d digital) as data, and for a CRL-style gain config
-   struct (min/max/step gain, register addr+mask, optional code->reg LUT). The
-   reference T41 driver's `gc2607_alloc_again` / `gc2607_alloc_dgain` functions
-   are the same model expressed in C (that file was `reference/gc2607.c` in the
-   old submodule, removed from the tree — recover from the Windows pkg analysis
-   or the deleted submodule history if needed).
-2. Determine the unit: IPU6 analog gain is typically a "gain code" the CMC/aiqb
-   maps to real gain. Confirm against the `.aiqb` CMC if the `.sys` is ambiguous.
-3. Rewrite the gain path in `gc2607.c`: `V4L2_CID_ANALOGUE_GAIN` (min/max/step in
-   register units, `s_ctrl` writes 0x02b3/0x02b4 per the model) and add
-   `V4L2_CID_DIGITAL_GAIN` (writes 0x020c/0x020d). Drop or keep `gc2607_gain_table`
-   as an internal helper. Bump the ctrl handler count.
-4. Reload + re-test with `scripts/capture-gst-frame.sh`; expect EINVAL spam gone
-   and visibly less grain (AE chooses lower analog gain + longer exposure).
+Cross-check that closed the loop: the SMIA formula `code/64` reproduces the LUT
+endpoints exactly (code 1012 → 15.8125x = LUT max; code 64 → 1.0x = LUT min), and
+all 17 reference real-gains map cleanly inside the CMC's `[64, 2240]` code range.
 
-IMPORTANT (upstreaming): register addresses, values and a gain *formula* are
-functional hardware facts and are fine to use (GalaxyCore sensors gc05a2/gc08a3/
-gc2145 are already mainline with opaque register tables). Re-express facts in our
-own code; never paste disassembled C, strings, or copyrighted text from the
-binary. File is already SPDX GPL-2.0. The gain rework toward standard
-ANALOGUE_GAIN/DIGITAL_GAIN semantics moves the driver *toward* upstreamable shape.
+### How it was decoded (reproduce)
+
+- The Windows `gc2607.sys` was disassembled (radare2) first, since the original
+  plan assumed the gain LUT lived there. It does **not**: the gain-apply function
+  (a mutex-guarded read-modify-write of 0x0202/0x0203 exposure + 0x02b3/0x02b4 +
+  0x020c/0x020d, via the i2c helper at VA 0x140005088) pulls already-computed
+  values from a struct, and no 17-entry again byte-table is present — the `.sys`
+  computes gain by formula from the AIQ code. So the **CMC in the `.aiqb` is the
+  authoritative source**, not the `.sys`. (The `.sys` still holds the init
+  register descriptor table at `.rdata` VA 0x140022c30, matching
+  `tools/win_gc2607_regs.txt`.)
+- CMC record stream start (file off `0x50`) and per-record alignment were found by
+  walking the `{u32 size,…}` size-chain until it produced a long valid run of
+  records. Relevant records, by file offset:
+  `name 19 (analog_gain_conversion, deprecated/empty) @0x020390`,
+  `name 20 (digital_gain) @0x0203a0`,
+  `name 34 (multi_gain_conversions) @0x029e48` with its `cmc_gain_segment_t`
+  (gain_begin/end floats + code_min/max/step + M0/C0/M1/C1) at `@0x029e90`.
+- HAL data-flow that fixes the units to V4L2 (paths under `third_party/
+  ipu6-camera-hal/src/`): `3a/SensorManager.cpp` pushes
+  `exp.sensorParam.analog_gain_code_global` / `digital_gain_global`, then
+  `core/SensorHwCtrl.cpp` writes them: `setAnalogGains()` →
+  `SetControl(V4L2_CID_ANALOGUE_GAIN)` (~L354); `setDigitalGains()` →
+  `SetControl(V4L2_CID_DIGITAL_GAIN)` **every frame** (~L392) and
+  `SetControl(V4L2_CID_GAIN)` **only if** `isUsingSensorDigitalGain` (~L385).
+  Hence DIGITAL_GAIN is the one that must exist; GAIN is conditional.
+
+### Shipped fix
+
+- `V4L2_CID_ANALOGUE_GAIN` now in **1/64 units, min 64 (1.0x), max 1012
+  (15.8125x = again-LUT ceiling), default 64**. `s_ctrl` calls
+  `gc2607_again_for_code()` to round the requested code down to the nearest
+  again-table entry and writes its four registers.
+- Added `V4L2_CID_DIGITAL_GAIN` (256..256, fixed 1.0x) as an accepted no-op so
+  the HAL's per-frame writes stop returning EINVAL; `V4L2_CID_GAIN` shares the
+  same no-op case for the conditional `isUsingSensorDigitalGain` path.
+
+Result (hardware): controls now read `analogue_gain min=64 max=1012`,
+`digital_gain 256`; 30fps stays clean; AE ramps smoothly from gain default and
+settles on a **low** analog code in normal light → real, correctly-exposed,
+**non-grainy** images (verified visually). The `SetControl Invalid argument` spam
+is gone.
+
+Note: analog gain above 15.8x (CMC allows up to 35x) is not realized — it would
+need the digital path, which this tuning fixes at 1.0x. Fine for a webcam; AE
+pulls exposure first and only saturates gain in very dark scenes. If real digital
+gain is ever wired up: the CMC `digital_gain_global` is in 1/256 units while the
+sensor's 0x020c:0x020d register pair is 1/64 (0x0040 = 1.0x), so register =
+code / 4 — but note 0x020c/0x020d is already consumed by the analog fine-trim, so
+a separate dgain register (or ISP digital gain) would be needed to avoid a clash.
+
+Upstreaming: register addresses/values and the `gain = code/64` formula are
+functional hardware facts (gc05a2/gc08a3/gc2145 ship mainline with opaque
+register tables). All of it is re-expressed in our own code; no disassembled C,
+strings, or copyrighted text from the binary was copied. File is SPDX GPL-2.0,
+and standard ANALOGUE_GAIN/DIGITAL_GAIN semantics move it toward upstreamable
+shape.
 
 ## Build / reload / test reference
 
@@ -290,6 +331,10 @@ Notes:
 
 ## Open threads (HAL)
 
-- Gain model RE (above) — the active task.
-- Whether `V4L2_CID_GAIN` (vs DIGITAL_GAIN) is also required, or aliases.
+- Gain model RE — **done** (see "Fixed: grainy images" above). `V4L2_CID_GAIN`
+  shares the digital-gain no-op case; only `DIGITAL_GAIN` is written unconditionally.
+- Analog gain >15.8x (CMC allows 35x) not realized — would need a working digital
+  path, which the current tuning fixes at 1.0x. Revisit only if low-light is poor.
+- AE settling: each fresh pipeline start ramps from the gain default; a few frames
+  to converge. Tune default/initial-skip if first-frame latency matters.
 - Lens shading / color: not yet evaluated (focus has been exposure/gain).
