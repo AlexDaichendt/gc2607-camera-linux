@@ -39,7 +39,7 @@
 
 /* Exposure and gain limits */
 #define GC2607_EXPOSURE_MIN		4
-#define GC2607_EXPOSURE_MAX		1100	/* < VTS (1116) */
+#define GC2607_EXPOSURE_MAX		(GC2607_VTS - GC2607_EXPOSURE_MARGIN)  /* tracks frame length */
 #define GC2607_EXPOSURE_STEP		1
 #define GC2607_EXPOSURE_DEFAULT		1000	/* indoor default, < VTS */
 
@@ -60,7 +60,9 @@
 #define GC2607_WIDTH			1920
 #define GC2607_HEIGHT			1080
 #define GC2607_HBLANK			(GC2607_HTS - GC2607_WIDTH)   /* 39, llp=width+hblank */
-#define GC2607_VBLANK			(GC2607_VTS - GC2607_HEIGHT)  /* 36, fll=height+vblank */
+#define GC2607_VBLANK			(GC2607_VTS - GC2607_HEIGHT)  /* 36, fll=height+vblank (30fps) */
+#define GC2607_VBLANK_MAX		2270  /* VTS up to ~3350 -> ~10fps for low-light AE */
+#define GC2607_EXPOSURE_MARGIN		8     /* exposure must stay below frame length */
 
 /*
  * PLL / timing sweep overrides (experimental, branch: pll-sweep)
@@ -169,6 +171,7 @@ struct gc2607 {
 	struct v4l2_ctrl *pixel_rate;
 	struct v4l2_ctrl *exposure;
 	struct v4l2_ctrl *gain;
+	struct v4l2_ctrl *vblank;
 
 	/* Power management resources (provided by INT3472 PMIC) */
 	struct clk *xclk;		/* Master clock (typically 19.2 MHz) */
@@ -703,11 +706,33 @@ static int gc2607_s_ctrl(struct v4l2_ctrl *ctrl)
 	struct i2c_client *client = gc2607->client;
 	int ret = 0;
 
+	/* VBLANK changes the frame length, which sets the exposure ceiling.
+	 * Retrack the exposure control's max before touching hardware.
+	 */
+	if (ctrl->id == V4L2_CID_VBLANK) {
+		int vts = GC2607_HEIGHT + ctrl->val;
+
+		__v4l2_ctrl_modify_range(gc2607->exposure, GC2607_EXPOSURE_MIN,
+					 vts - GC2607_EXPOSURE_MARGIN, 1,
+					 gc2607->exposure->cur.val);
+	}
+
 	/* Only apply controls when streaming */
 	if (!pm_runtime_get_if_in_use(&client->dev))
 		return 0;
 
 	switch (ctrl->id) {
+	case V4L2_CID_VBLANK: {
+		int vts = GC2607_HEIGHT + ctrl->val;
+
+		/* frame length lives in both 0x0220/21 and 0x0340/41 */
+		ret = gc2607_write_reg(gc2607, 0x0220, (vts >> 8) & 0x3f);
+		if (!ret) ret = gc2607_write_reg(gc2607, 0x0221, vts & 0xff);
+		if (!ret) ret = gc2607_write_reg(gc2607, 0x0340, (vts >> 8) & 0x7f);
+		if (!ret) ret = gc2607_write_reg(gc2607, 0x0341, vts & 0xff);
+		break;
+	}
+
 	case V4L2_CID_EXPOSURE:
 		/* Write exposure value to registers (16-bit) */
 		ret = gc2607_write_reg(gc2607, GC2607_REG_EXPOSURE_H,
@@ -951,18 +976,19 @@ static int gc2607_probe(struct i2c_client *client)
 	if (gc2607->pixel_rate)
 		gc2607->pixel_rate->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
-	/* HBLANK / VBLANK: read-only frame timing for the HAL 3A (llp/fll).
-	 * Fixed because the mode runs near-minimum blanking (see FINDINGS.md).
-	 */
+	/* HBLANK: read-only (line length is fixed for this mode -> llp). */
 	ctrl = v4l2_ctrl_new_std(&gc2607->ctrls, NULL, V4L2_CID_HBLANK,
 				 GC2607_HBLANK, GC2607_HBLANK, 1, GC2607_HBLANK);
 	if (ctrl)
 		ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
-	ctrl = v4l2_ctrl_new_std(&gc2607->ctrls, NULL, V4L2_CID_VBLANK,
-				 GC2607_VBLANK, GC2607_VBLANK, 1, GC2607_VBLANK);
-	if (ctrl)
-		ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+	/* VBLANK: writable so HAL 3A can extend the frame (lower fps) for longer
+	 * exposure in low light -> less gain -> less noise. Drives VTS; exposure
+	 * max tracks it (see gc2607_s_ctrl).
+	 */
+	gc2607->vblank = v4l2_ctrl_new_std(&gc2607->ctrls, &gc2607_ctrl_ops,
+					   V4L2_CID_VBLANK, GC2607_VBLANK,
+					   GC2607_VBLANK_MAX, 1, GC2607_VBLANK);
 
 	/* Exposure control */
 	gc2607->exposure = v4l2_ctrl_new_std(&gc2607->ctrls,
