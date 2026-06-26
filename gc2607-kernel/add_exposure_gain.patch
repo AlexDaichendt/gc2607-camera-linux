@@ -1,0 +1,13 @@
+This patch adds exposure and gain controls to the GC2607 driver.
+
+Key changes:
+1. Add exposure control (V4L2_CID_EXPOSURE)
+2. Add analog gain control (V4L2_CID_ANALOGUE_GAIN)
+3. Implement s_ctrl callback to write values to sensor registers
+4. Increase control handler size from 2 to 4 controls
+
+Register mapping:
+- Exposure: 0x0202 (high byte), 0x0203 (low byte)
+- Gain: 0x02b3, 0x02b4 (simplified - full implementation uses LUT)
+
+Default values provide good starting exposure.
