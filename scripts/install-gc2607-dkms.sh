@@ -4,8 +4,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRIVER="${DRIVER:-${1:-$ROOT/gc2607-kernel}}"
 PACKAGE_NAME=gc2607
-PACKAGE_VERSION=0.1.0
-SOURCE_DIR="/usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION}"
 
 if [[ "$(id -u)" -ne 0 ]]; then
     cat >&2 <<EOF
@@ -15,32 +13,34 @@ EOF
     exit 1
 fi
 
-# The upstream driver tree does not ship a dkms.conf. Prefer one from the driver
-# tree if it exists, otherwise fall back to the dkms.conf bundled with this repo.
-DKMS_CONF="${DKMS_CONF:-$DRIVER/dkms.conf}"
-if [[ ! -f "$DKMS_CONF" ]]; then
-    DKMS_CONF="$ROOT/config/dkms/gc2607-dkms.conf"
-fi
+DRIVER="$(cd "$DRIVER" && pwd)"
 
-for file in "$DRIVER/gc2607.c" "$DRIVER/Makefile" "$DKMS_CONF"; do
+for file in "$DRIVER/gc2607.c" "$DRIVER/Makefile" "$DRIVER/dkms.conf"; do
     if [[ ! -f "$file" ]]; then
         echo "Missing $file" >&2
-        echo "Clone and patch the GC2607 driver repo first, or set DRIVER=/path/to/gc2607-v4l2-driver." >&2
+        echo "Expected the GC2607 driver tree (with dkms.conf) under gc2607-kernel/, or set DRIVER=/path/to/driver-tree." >&2
         exit 1
     fi
 done
 
-install -d "$SOURCE_DIR"
-install -m 0644 "$DRIVER/gc2607.c" "$DRIVER/Makefile" "$SOURCE_DIR/"
-install -m 0644 "$DKMS_CONF" "$SOURCE_DIR/dkms.conf"
-install -D -m 0644 "$ROOT/config/modules-load.d/gc2607.conf" /etc/modules-load.d/gc2607.conf
-
-if ! dkms status -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION" >/dev/null 2>&1; then
-    dkms add -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"
+# Version lives in exactly one place: dkms.conf.
+PACKAGE_VERSION="$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)".*/\1/p' "$DRIVER/dkms.conf")"
+if [[ -z "$PACKAGE_VERSION" ]]; then
+    echo "Could not read PACKAGE_VERSION from $DRIVER/dkms.conf" >&2
+    exit 1
 fi
 
-dkms build -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"
-dkms install -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION" --force
+# Point /usr/src at the in-repo driver tree instead of copying files in. dkms
+# re-reads the source on every build, so edits in the repo flow straight through
+# to the next rebuild with nothing to keep in sync.
+ln -sfn "$DRIVER" "/usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION}"
+
+# dkms add reads dkms.conf and stages the whole tree; install builds + installs
+# (the toolchain flag is handled inside dkms.conf). --force re-runs after edits.
+if ! dkms status -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION" 2>/dev/null | grep -q .; then
+    dkms add -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"
+fi
+dkms install --force -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"
 depmod -a
 
 if lsmod | grep -q "^${PACKAGE_NAME}[[:space:]]"; then
@@ -49,4 +49,4 @@ else
     modprobe "$PACKAGE_NAME"
 fi
 
-echo "Installed $PACKAGE_NAME with DKMS and enabled boot-time module loading."
+echo "Installed $PACKAGE_NAME $PACKAGE_VERSION with DKMS and enabled boot-time module loading."

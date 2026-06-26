@@ -2,9 +2,9 @@
 /*
  * GalaxyCore GC2607 sensor driver
  *
- * Copyright (C) 2026 Your Name
- *
- * Based on GC2145 driver and original Ingenic T41 driver
+ * 1/7.3" 1080p RAW10 Bayer sensor, 2-lane MIPI CSI-2, as wired on the
+ * HUAWEI MateBook (Intel IPU6 / Meteor Lake, INT3472 PMIC, 19.2 MHz MCLK).
+ * The register init set and blanking are tuned for a 19.2 MHz external clock.
  */
 
 #include <linux/acpi.h>
@@ -17,11 +17,11 @@
 #include <linux/regulator/consumer.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
+#include <media/v4l2-event.h>
 #include <media/v4l2-fwnode.h>
 #include <media/v4l2-async.h>
 
-#define GC2607_CHIP_ID_H		0x26
-#define GC2607_CHIP_ID_L		0x07
+#define GC2607_CHIP_ID			0x2607
 #define GC2607_REG_CHIP_ID_H		0x03f0
 #define GC2607_REG_CHIP_ID_L		0x03f1
 
@@ -29,13 +29,25 @@
 #define GC2607_REG_END			0xffff
 #define GC2607_REG_DELAY		0x0000
 
-/* Exposure and gain registers */
-#define GC2607_REG_EXPOSURE_H		0x0202
-#define GC2607_REG_EXPOSURE_L		0x0203
-#define GC2607_REG_AGAIN_H		0x02b3
+/* Exposure and gain registers (datasheet section 9.6 + register list) */
+#define GC2607_REG_EXPOSURE_H		0x0202	/* CISCTL_exp[14:8] */
+#define GC2607_REG_EXPOSURE_L		0x0203	/* CISCTL_exp[7:0] */
+#define GC2607_REG_AGAIN_H		0x02b3	/* ANALOG_PGA_gain_T1 */
 #define GC2607_REG_AGAIN_L		0x02b4
-#define GC2607_REG_DGAIN_H		0x020c
+#define GC2607_REG_DGAIN_H		0x020c	/* col_gain_T1 (analog fine-trim) */
 #define GC2607_REG_DGAIN_L		0x020d
+#define GC2607_REG_FLL_H		0x0340	/* frame_length[14:8] (documented) */
+#define GC2607_REG_FLL_L		0x0341
+#define GC2607_REG_VTS_H		0x0220	/* undocumented frame-length mirror */
+#define GC2607_REG_VTS_L		0x0221	/* (kept from the reference init) */
+
+/* External clock the shipped init/timing assumes. The sensor itself accepts
+ * 6..27 MHz (datasheet typ 24 MHz), but the PLL block in the init array only
+ * yields 30 fps at this rate; any other rate moves the pixel clock.
+ */
+#define GC2607_XCLK_FREQ		19200000
+
+#define GC2607_DATA_LANES		2
 
 /* Exposure and gain limits */
 #define GC2607_EXPOSURE_MIN		4
@@ -68,66 +80,25 @@
 #define GC2607_DIG_GAIN_STEP		1
 #define GC2607_DIG_GAIN_DEFAULT		256
 
-/* Sensor timing - modified for better low-light performance */
-/* Sensor readout pixel rate = HTS x VTS x fps (used by HAL 3A for frame
- * duration + exposure<->time conversion). NOT the MIPI bus rate.
+/* Sensor timing. The init register set keeps the reference (24 MHz) PLL but
+ * runs near-minimum blanking so that at this board's 19.2 MHz MCLK the
+ * resulting ~65.6 MHz readout clock still yields 30 fps. See README / FINDINGS.
  */
-#define GC2607_PIXEL_RATE		((s64)GC2607_HTS * GC2607_VTS * 30)  /* ~65.6 MHz */
-#define GC2607_LINK_FREQ		336000000LL  /* 672 Mbps / 2 lanes */
-#define GC2607_HTS			1959  /* tight h-blank for 30fps at stock 65.6MHz sclk */
-#define GC2607_VTS			1116  /* min frame length (1080+20+16) -> 30.0 fps */
+#define GC2607_HTS			1959	/* line length 0x0342/0x0343 */
+#define GC2607_VTS			1116	/* min frame length (1080+20+16) -> 30.0 fps */
 #define GC2607_WIDTH			1920
 #define GC2607_HEIGHT			1080
 #define GC2607_HBLANK			(GC2607_HTS - GC2607_WIDTH)   /* 39, llp=width+hblank */
 #define GC2607_VBLANK			(GC2607_VTS - GC2607_HEIGHT)  /* 36, fll=height+vblank (30fps) */
-#define GC2607_VBLANK_MAX		2270  /* VTS up to ~3350 -> ~10fps for low-light AE */
-#define GC2607_EXPOSURE_MARGIN		8     /* exposure must stay below frame length */
+#define GC2607_VBLANK_MAX		2270	/* VTS up to ~3350 -> ~10fps for low-light AE */
+#define GC2607_EXPOSURE_MARGIN		8	/* exposure must stay below frame length */
 
-/*
- * PLL / timing sweep overrides (experimental, branch: pll-sweep)
- *
- * Each parameter overrides exactly one register, applied AFTER the mode init
- * array in s_stream(). Default -1 means "leave the init value untouched", so
- * loading the module with no params reproduces stock behaviour bit-for-bit.
- *
- * Purpose: bisect the PLL multiplier (0x0134) and rebalance the readout / MIPI
- * dividers (0x0315 / 0x031c / 0x0d06) to raise the sensor pixel clock from the
- * ~65.6 MHz seen at 19.2 MHz MCLK toward the ~82 MHz needed for 30 fps, while
- * keeping the MIPI link <= 672 Mbps/lane so the IPU6 CSI receiver still locks.
- * vts / frame_len let you re-trim blanking after the clock moves.
- *
- *   sudo insmod gc2607.ko reg0134=0x72 vts=1335
+/* Sensor readout pixel rate = HTS x VTS x fps. The HAL 3A uses it together with
+ * hblank/vblank for frame-duration and exposure<->time conversion, so it must
+ * be the readout rate, NOT the MIPI bus rate.
  */
-static int reg0134 = -1;	/* PLL multiplier (init 0x5b) */
-static int reg0135 = -1;	/* PLL (init 0x01) */
-static int reg0136 = -1;	/* PLL (init 0x2a) */
-static int reg0137 = -1;	/* PLL (init 0x03) */
-static int reg0315 = -1;	/* system/readout divider (init 0xd4) */
-static int reg031c = -1;	/* system/MIPI divider (init 0x93) */
-static int reg0d06 = -1;	/* PLL/clock enable (init 0x01) */
-static int hts     = -1;	/* line length 0x0342/0x0343 (init 2048) */
-static int vts     = -1;	/* frame length 0x0220/0x0221 (init 1335) */
-static int frame_len = -1;	/* frame length 0x0340/0x0341 (init 2670) */
-module_param(reg0134, int, 0644);
-MODULE_PARM_DESC(reg0134, "Override 0x0134 PLL reg (-1 = keep init value)");
-module_param(reg0135, int, 0644);
-MODULE_PARM_DESC(reg0135, "Override 0x0135 PLL reg (-1 = keep init value)");
-module_param(reg0136, int, 0644);
-MODULE_PARM_DESC(reg0136, "Override 0x0136 PLL reg (-1 = keep init value)");
-module_param(reg0137, int, 0644);
-MODULE_PARM_DESC(reg0137, "Override 0x0137 PLL reg (-1 = keep init value)");
-module_param(reg0315, int, 0644);
-MODULE_PARM_DESC(reg0315, "Override 0x0315 divider (-1 = keep init value)");
-module_param(reg031c, int, 0644);
-MODULE_PARM_DESC(reg031c, "Override 0x031c divider (-1 = keep init value)");
-module_param(reg0d06, int, 0644);
-MODULE_PARM_DESC(reg0d06, "Override 0x0d06 clock-enable (-1 = keep init value)");
-module_param(hts, int, 0644);
-MODULE_PARM_DESC(hts, "Override line length 0x0342/0x0343 (-1 = keep init value)");
-module_param(vts, int, 0644);
-MODULE_PARM_DESC(vts, "Override frame length 0x0220/0x0221 (-1 = keep init value)");
-module_param(frame_len, int, 0644);
-MODULE_PARM_DESC(frame_len, "Override frame length 0x0340/0x0341 (-1 = keep init value)");
+#define GC2607_PIXEL_RATE		((s64)GC2607_HTS * GC2607_VTS * 30)  /* ~65.6 MHz */
+#define GC2607_LINK_FREQ		336000000LL  /* 672 Mbps / 2 lanes */
 
 /* Register value pair for initialization sequences */
 struct gc2607_regval {
@@ -205,24 +176,26 @@ struct gc2607 {
 	struct media_pad pad;
 	struct i2c_client *client;
 
+	/* Serializes s_stream against control writes (also the ctrl handler lock) */
+	struct mutex mutex;
+
 	/* V4L2 controls */
 	struct v4l2_ctrl_handler ctrls;
 	struct v4l2_ctrl *link_freq;
 	struct v4l2_ctrl *pixel_rate;
 	struct v4l2_ctrl *exposure;
-	struct v4l2_ctrl *gain;
+	struct v4l2_ctrl *analogue_gain;
 	struct v4l2_ctrl *digital_gain;
 	struct v4l2_ctrl *vblank;
 
 	/* Power management resources (provided by INT3472 PMIC) */
-	struct clk *xclk;		/* Master clock (typically 19.2 MHz) */
+	struct clk *xclk;		/* Master clock (19.2 MHz on this board) */
 	struct gpio_desc *reset_gpio;	/* Reset GPIO (active low) */
 	struct gpio_desc *powerdown_gpio; /* Power-down GPIO (if present) */
 	struct regulator_bulk_data supplies[3];
 
-	/* Current mode and format */
+	/* Current mode */
 	const struct gc2607_mode *cur_mode;
-	struct v4l2_mbus_framefmt fmt;
 
 	/* Device state */
 	bool streaming;
@@ -289,69 +262,39 @@ static int gc2607_write_reg(struct gc2607 *gc2607, u16 reg, u8 val)
 }
 
 /*
- * Write an array of registers
- * Handles special markers: GC2607_REG_DELAY for delays, GC2607_REG_END for end
+ * Write an array of registers.
+ * Handles special markers: GC2607_REG_DELAY for delays, GC2607_REG_END for end.
  */
-/*
- * Return the module-param override for a register address (high/low bytes of
- * the 16-bit timing values are split out), or -1 to keep the array value.
- * Applied in-sequence so PLL writes land BEFORE the PLL locks during init.
- */
-static int gc2607_override(u16 addr)
-{
-	switch (addr) {
-	case 0x0134: return reg0134;
-	case 0x0135: return reg0135;
-	case 0x0136: return reg0136;
-	case 0x0137: return reg0137;
-	case 0x0315: return reg0315;
-	case 0x031c: return reg031c;
-	case 0x0d06: return reg0d06;
-	case 0x0342: return hts < 0 ? -1 : ((hts >> 8) & 0x3f);
-	case 0x0343: return hts < 0 ? -1 : (hts & 0xff);
-	case 0x0220: return vts < 0 ? -1 : ((vts >> 8) & 0x3f);
-	case 0x0221: return vts < 0 ? -1 : (vts & 0xff);
-	case 0x0340: return frame_len < 0 ? -1 : ((frame_len >> 8) & 0x7f);
-	case 0x0341: return frame_len < 0 ? -1 : (frame_len & 0xff);
-	}
-	return -1;
-}
-
 static int gc2607_write_array(struct gc2607 *gc2607,
-			       const struct gc2607_regval *regs)
+			      const struct gc2607_regval *regs)
 {
 	struct i2c_client *client = gc2607->client;
-	int ret = 0;
+	int ret;
 	u32 i;
 
 	for (i = 0; regs[i].addr != GC2607_REG_END; i++) {
 		if (regs[i].addr == GC2607_REG_DELAY) {
 			msleep(regs[i].val);
-		} else {
-			int ov = gc2607_override(regs[i].addr);
-			u8 val = ov < 0 ? regs[i].val : (u8)ov;
+			continue;
+		}
 
-			if (ov >= 0)
-				dev_info(&client->dev,
-					 "PLL-SWEEP: 0x%04x = 0x%02x (was 0x%02x)\n",
-					 regs[i].addr, val, regs[i].val);
-			ret = gc2607_write_reg(gc2607, regs[i].addr, val);
-			if (ret < 0) {
-				dev_err(&client->dev,
-					"Failed to write reg 0x%04x at index %u: %d\n",
-					regs[i].addr, i, ret);
-				return ret;
-			}
+		ret = gc2607_write_reg(gc2607, regs[i].addr, regs[i].val);
+		if (ret < 0) {
+			dev_err(&client->dev,
+				"Failed to write reg 0x%04x at index %u: %d\n",
+				regs[i].addr, i, ret);
+			return ret;
 		}
 	}
 
-	dev_info(&client->dev, "Wrote %u registers successfully\n", i);
+	dev_dbg(&client->dev, "Wrote %u registers\n", i);
 	return 0;
 }
 
 /*
- * Register initialization sequence for 1920x1080@30fps MIPI mode
- * Extracted from reference driver gc2607_init_regs_1920_1080_30fps_mipi[]
+ * Register initialization sequence for 1920x1080@30fps MIPI mode.
+ * Derived from the GalaxyCore reference init, with blanking retuned for 30 fps
+ * at this board's 19.2 MHz MCLK (see README / FINDINGS).
  */
 static const struct gc2607_regval gc2607_1080p_30fps_regs[] = {
 	{0x03fe, 0xf0},
@@ -495,6 +438,16 @@ static const s64 gc2607_link_freqs[] = {
 	GC2607_LINK_FREQ,
 };
 
+static void gc2607_fill_fmt(const struct gc2607_mode *mode,
+			    struct v4l2_mbus_framefmt *fmt)
+{
+	fmt->width = mode->width;
+	fmt->height = mode->height;
+	fmt->code = MEDIA_BUS_FMT_SGRBG10_1X10;
+	fmt->field = V4L2_FIELD_NONE;
+	fmt->colorspace = V4L2_COLORSPACE_RAW;
+}
+
 /*
  * Power management
  */
@@ -503,17 +456,14 @@ static int gc2607_power_on(struct gc2607 *gc2607)
 	struct i2c_client *client = gc2607->client;
 	int ret;
 
-	dev_info(&client->dev, "%s: Powering on sensor\n", __func__);
-
 	/* Enable regulators if available */
 	if (gc2607->supplies[0].supply) {
 		ret = regulator_bulk_enable(ARRAY_SIZE(gc2607->supplies),
-					     gc2607->supplies);
+					    gc2607->supplies);
 		if (ret) {
 			dev_err(&client->dev, "Failed to enable regulators: %d\n", ret);
 			return ret;
 		}
-		dev_dbg(&client->dev, "Regulators enabled\n");
 		usleep_range(5000, 6000);
 	}
 
@@ -524,56 +474,38 @@ static int gc2607_power_on(struct gc2607 *gc2607)
 			dev_err(&client->dev, "Failed to enable clock: %d\n", ret);
 			goto err_reg;
 		}
-		dev_dbg(&client->dev, "Clock enabled\n");
 		usleep_range(5000, 6000);
 	}
 
 	/*
-	 * Reset sequence from reference driver (gc2607.c:689-694):
-	 * Physical: HIGH (20ms) → LOW (20ms) → HIGH (10ms)
+	 * Reset sequence from the reference driver, validated on hardware:
+	 * physical HIGH (20ms) -> LOW (20ms) -> HIGH (10ms).
 	 *
-	 * For gpiod API with active-low GPIO (GPIOD_OUT_LOW):
-	 * - gpiod_set_value(0) = de-assert = physical HIGH = running
-	 * - gpiod_set_value(1) = assert = physical LOW = reset
+	 * The GPIO is described active-low, so gpiod_set_value(0) de-asserts
+	 * (physical HIGH = running) and gpiod_set_value(1) asserts (LOW = reset).
 	 */
 	if (gc2607->reset_gpio) {
-		/* Start: de-asserted (running) */
 		gpiod_set_value_cansleep(gc2607->reset_gpio, 0);
 		msleep(20);
-
-		/* Assert reset (put sensor into reset) */
 		gpiod_set_value_cansleep(gc2607->reset_gpio, 1);
 		msleep(20);
-
-		/* De-assert reset (release from reset, sensor boots) */
 		gpiod_set_value_cansleep(gc2607->reset_gpio, 0);
 		msleep(10);
-
-		dev_dbg(&client->dev, "Reset pulse completed\n");
 	}
 
-	/*
-	 * Powerdown sequence from reference driver (gc2607.c:702-707):
-	 * If present, pulse the powerdown GPIO
-	 * Assuming active-high powerdown (high = powered down)
-	 */
+	/* If present, pulse the powerdown GPIO (active high: 1 = powered down) */
 	if (gc2607->powerdown_gpio) {
-		/* Power down */
 		gpiod_set_value_cansleep(gc2607->powerdown_gpio, 1);
 		msleep(10);
-
-		/* Power up */
 		gpiod_set_value_cansleep(gc2607->powerdown_gpio, 0);
 		msleep(10);
-
-		dev_dbg(&client->dev, "Powerdown pulse completed\n");
 	}
 
 	/* Wait for sensor to fully boot */
 	msleep(20);
 
 	gc2607->powered = true;
-	dev_info(&client->dev, "Sensor powered on\n");
+	dev_dbg(&client->dev, "Sensor powered on\n");
 
 	return 0;
 
@@ -587,37 +519,48 @@ static void gc2607_power_off(struct gc2607 *gc2607)
 {
 	struct i2c_client *client = gc2607->client;
 
-	dev_info(&client->dev, "%s: Powering off sensor\n", __func__);
-
 	if (!gc2607->powered)
 		return;
 
-	/* Assert reset if GPIO exists */
 	if (gc2607->reset_gpio)
 		gpiod_set_value_cansleep(gc2607->reset_gpio, 0);
 
-	/* Assert power-down if GPIO exists */
 	if (gc2607->powerdown_gpio)
 		gpiod_set_value_cansleep(gc2607->powerdown_gpio, 1);
 
-	/* Disable master clock if available */
 	if (gc2607->xclk)
 		clk_disable_unprepare(gc2607->xclk);
 
-	/* Disable regulators if available */
 	if (gc2607->supplies[0].supply)
 		regulator_bulk_disable(ARRAY_SIZE(gc2607->supplies), gc2607->supplies);
 
 	gc2607->powered = false;
-	dev_info(&client->dev, "Sensor powered off\n");
+	dev_dbg(&client->dev, "Sensor powered off\n");
 }
+
+/*
+ * V4L2 subdev internal ops
+ */
+static int gc2607_init_state(struct v4l2_subdev *sd,
+			     struct v4l2_subdev_state *sd_state)
+{
+	struct v4l2_mbus_framefmt *fmt =
+		v4l2_subdev_state_get_format(sd_state, 0);
+
+	gc2607_fill_fmt(&gc2607_modes[0], fmt);
+	return 0;
+}
+
+static const struct v4l2_subdev_internal_ops gc2607_internal_ops = {
+	.init_state = gc2607_init_state,
+};
 
 /*
  * V4L2 subdev pad operations
  */
 static int gc2607_enum_mbus_code(struct v4l2_subdev *sd,
-				  struct v4l2_subdev_state *sd_state,
-				  struct v4l2_subdev_mbus_code_enum *code)
+				 struct v4l2_subdev_state *sd_state,
+				 struct v4l2_subdev_mbus_code_enum *code)
 {
 	if (code->index > 0)
 		return -EINVAL;
@@ -627,8 +570,8 @@ static int gc2607_enum_mbus_code(struct v4l2_subdev *sd,
 }
 
 static int gc2607_enum_frame_size(struct v4l2_subdev *sd,
-				   struct v4l2_subdev_state *sd_state,
-				   struct v4l2_subdev_frame_size_enum *fse)
+				  struct v4l2_subdev_state *sd_state,
+				  struct v4l2_subdev_frame_size_enum *fse)
 {
 	if (fse->index >= ARRAY_SIZE(gc2607_modes))
 		return -EINVAL;
@@ -644,45 +587,63 @@ static int gc2607_enum_frame_size(struct v4l2_subdev *sd,
 	return 0;
 }
 
-static int gc2607_get_fmt(struct v4l2_subdev *sd,
-			   struct v4l2_subdev_state *sd_state,
-			   struct v4l2_subdev_format *format)
+static int gc2607_enum_frame_interval(struct v4l2_subdev *sd,
+				      struct v4l2_subdev_state *sd_state,
+				      struct v4l2_subdev_frame_interval_enum *fie)
 {
-	struct gc2607 *gc2607 = to_gc2607(sd);
-	struct v4l2_mbus_framefmt *mbus_fmt = &format->format;
+	if (fie->index >= ARRAY_SIZE(gc2607_modes))
+		return -EINVAL;
 
-	/* Only support ACTIVE format (TRY not implemented) */
-	mbus_fmt->width = gc2607->cur_mode->width;
-	mbus_fmt->height = gc2607->cur_mode->height;
-	mbus_fmt->code = MEDIA_BUS_FMT_SGRBG10_1X10;
-	mbus_fmt->field = V4L2_FIELD_NONE;
-	mbus_fmt->colorspace = V4L2_COLORSPACE_RAW;
+	if (fie->code != MEDIA_BUS_FMT_SGRBG10_1X10)
+		return -EINVAL;
+
+	if (fie->width != gc2607_modes[fie->index].width ||
+	    fie->height != gc2607_modes[fie->index].height)
+		return -EINVAL;
+
+	fie->interval.numerator = 1;
+	fie->interval.denominator = gc2607_modes[fie->index].max_fps;
 
 	return 0;
 }
 
-static int gc2607_set_fmt(struct v4l2_subdev *sd,
-			   struct v4l2_subdev_state *sd_state,
-			   struct v4l2_subdev_format *format)
+static int gc2607_get_frame_interval(struct v4l2_subdev *sd,
+				     struct v4l2_subdev_state *sd_state,
+				     struct v4l2_subdev_frame_interval *fi)
 {
 	struct gc2607 *gc2607 = to_gc2607(sd);
-	struct v4l2_mbus_framefmt *mbus_fmt = &format->format;
-	const struct gc2607_mode *mode;
 
-	/* Only support the default mode */
-	mode = &gc2607_modes[0];
+	if (fi->which != V4L2_SUBDEV_FORMAT_ACTIVE)
+		return -EINVAL;
 
-	mbus_fmt->width = mode->width;
-	mbus_fmt->height = mode->height;
-	mbus_fmt->code = MEDIA_BUS_FMT_SGRBG10_1X10;
-	mbus_fmt->field = V4L2_FIELD_NONE;
-	mbus_fmt->colorspace = V4L2_COLORSPACE_RAW;
+	fi->interval.numerator = 1;
+	fi->interval.denominator = gc2607->cur_mode->max_fps;
 
-	/* Only support ACTIVE format (TRY not implemented) */
-	if (format->which == V4L2_SUBDEV_FORMAT_ACTIVE) {
-		gc2607->cur_mode = mode;
-		gc2607->fmt = *mbus_fmt;
-	}
+	return 0;
+}
+
+static int gc2607_get_fmt(struct v4l2_subdev *sd,
+			  struct v4l2_subdev_state *sd_state,
+			  struct v4l2_subdev_format *format)
+{
+	format->format = *v4l2_subdev_state_get_format(sd_state, format->pad);
+	return 0;
+}
+
+static int gc2607_set_fmt(struct v4l2_subdev *sd,
+			  struct v4l2_subdev_state *sd_state,
+			  struct v4l2_subdev_format *format)
+{
+	struct gc2607 *gc2607 = to_gc2607(sd);
+	struct v4l2_mbus_framefmt *fmt =
+		v4l2_subdev_state_get_format(sd_state, format->pad);
+
+	/* Single fixed mode: ignore the request and report what we support. */
+	gc2607_fill_fmt(&gc2607_modes[0], fmt);
+	format->format = *fmt;
+
+	if (format->which == V4L2_SUBDEV_FORMAT_ACTIVE)
+		gc2607->cur_mode = &gc2607_modes[0];
 
 	return 0;
 }
@@ -690,6 +651,9 @@ static int gc2607_set_fmt(struct v4l2_subdev *sd,
 static const struct v4l2_subdev_pad_ops gc2607_pad_ops = {
 	.enum_mbus_code = gc2607_enum_mbus_code,
 	.enum_frame_size = gc2607_enum_frame_size,
+	.enum_frame_interval = gc2607_enum_frame_interval,
+	.get_frame_interval = gc2607_get_frame_interval,
+	.set_frame_interval = gc2607_get_frame_interval,
 	.get_fmt = gc2607_get_fmt,
 	.set_fmt = gc2607_set_fmt,
 };
@@ -701,40 +665,50 @@ static int gc2607_s_stream(struct v4l2_subdev *sd, int enable)
 {
 	struct gc2607 *gc2607 = to_gc2607(sd);
 	struct i2c_client *client = gc2607->client;
-	int ret;
+	int ret = 0;
+
+	mutex_lock(&gc2607->mutex);
+
+	if (gc2607->streaming == enable)
+		goto unlock;
 
 	if (enable) {
 		ret = pm_runtime_resume_and_get(&client->dev);
 		if (ret)
-			return ret;
+			goto unlock;
 
-		dev_info(&client->dev, "Initializing sensor registers...\n");
-
-		/* Write initialization sequence for current mode */
+		/*
+		 * The GC2607 has no separate stream/standby register: streaming
+		 * begins once the init sequence (PLL + clock enable) has been
+		 * written, and stops when the sensor is powered down. So upload
+		 * the mode and apply the current controls here.
+		 */
 		ret = gc2607_write_array(gc2607, gc2607->cur_mode->reg_list);
 		if (ret) {
 			dev_err(&client->dev, "Failed to initialize sensor: %d\n", ret);
-			pm_runtime_put(&client->dev);
-			return ret;
+			goto err_pm;
 		}
 
-		/* Apply current control values (exposure, gain) */
 		ret = __v4l2_ctrl_handler_setup(&gc2607->ctrls);
 		if (ret) {
 			dev_err(&client->dev, "Failed to apply controls: %d\n", ret);
-			pm_runtime_put(&client->dev);
-			return ret;
+			goto err_pm;
 		}
 
-		dev_info(&client->dev, "Stream ON - sensor initialized\n");
 		gc2607->streaming = true;
 	} else {
-		dev_info(&client->dev, "Stream OFF\n");
 		gc2607->streaming = false;
 		pm_runtime_put(&client->dev);
 	}
 
+	mutex_unlock(&gc2607->mutex);
 	return 0;
+
+err_pm:
+	pm_runtime_put(&client->dev);
+unlock:
+	mutex_unlock(&gc2607->mutex);
+	return ret;
 }
 
 /*
@@ -758,7 +732,7 @@ static int gc2607_s_ctrl(struct v4l2_ctrl *ctrl)
 					 gc2607->exposure->cur.val);
 	}
 
-	/* Only apply controls when streaming */
+	/* Only touch hardware while the sensor is powered/streaming. */
 	if (!pm_runtime_get_if_in_use(&client->dev))
 		return 0;
 
@@ -766,24 +740,26 @@ static int gc2607_s_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_VBLANK: {
 		int vts = GC2607_HEIGHT + ctrl->val;
 
-		/* frame length lives in both 0x0220/21 and 0x0340/41 */
-		ret = gc2607_write_reg(gc2607, 0x0220, (vts >> 8) & 0x3f);
-		if (!ret) ret = gc2607_write_reg(gc2607, 0x0221, vts & 0xff);
-		if (!ret) ret = gc2607_write_reg(gc2607, 0x0340, (vts >> 8) & 0x7f);
-		if (!ret) ret = gc2607_write_reg(gc2607, 0x0341, vts & 0xff);
+		/* frame length lives in the documented 0x0340/41 plus the
+		 * reference's 0x0220/21 mirror.
+		 */
+		ret = gc2607_write_reg(gc2607, GC2607_REG_VTS_H, (vts >> 8) & 0x3f);
+		if (!ret)
+			ret = gc2607_write_reg(gc2607, GC2607_REG_VTS_L, vts & 0xff);
+		if (!ret)
+			ret = gc2607_write_reg(gc2607, GC2607_REG_FLL_H, (vts >> 8) & 0x7f);
+		if (!ret)
+			ret = gc2607_write_reg(gc2607, GC2607_REG_FLL_L, vts & 0xff);
 		break;
 	}
 
 	case V4L2_CID_EXPOSURE:
-		/* Write exposure value to registers (16-bit) */
+		/* 15-bit shutter time, high byte is CISCTL_exp[14:8]. */
 		ret = gc2607_write_reg(gc2607, GC2607_REG_EXPOSURE_H,
-				       (ctrl->val >> 8) & 0xff);
-		if (ret)
-			break;
-		ret = gc2607_write_reg(gc2607, GC2607_REG_EXPOSURE_L,
-				       ctrl->val & 0xff);
+				       (ctrl->val >> 8) & 0x7f);
 		if (!ret)
-			dev_dbg(&client->dev, "Set exposure to %d\n", ctrl->val);
+			ret = gc2607_write_reg(gc2607, GC2607_REG_EXPOSURE_L,
+					       ctrl->val & 0xff);
 		break;
 
 	case V4L2_CID_ANALOGUE_GAIN: {
@@ -794,15 +770,12 @@ static int gc2607_s_ctrl(struct v4l2_ctrl *ctrl)
 		const struct gc2607_gain_lut *lut = gc2607_again_for_code(ctrl->val);
 
 		ret = gc2607_write_reg(gc2607, GC2607_REG_AGAIN_H, lut->reg2b3);
-		if (!ret) ret = gc2607_write_reg(gc2607, GC2607_REG_AGAIN_L, lut->reg2b4);
-		if (!ret) ret = gc2607_write_reg(gc2607, GC2607_REG_DGAIN_H, lut->reg20c);
-		if (!ret) ret = gc2607_write_reg(gc2607, GC2607_REG_DGAIN_L, lut->reg20d);
-
 		if (!ret)
-			dev_dbg(&client->dev,
-				"analog gain code %d -> %u/64x (regs %02x %02x %02x %02x)\n",
-				ctrl->val, lut->code, lut->reg2b3, lut->reg2b4,
-				lut->reg20c, lut->reg20d);
+			ret = gc2607_write_reg(gc2607, GC2607_REG_AGAIN_L, lut->reg2b4);
+		if (!ret)
+			ret = gc2607_write_reg(gc2607, GC2607_REG_DGAIN_H, lut->reg20c);
+		if (!ret)
+			ret = gc2607_write_reg(gc2607, GC2607_REG_DGAIN_L, lut->reg20d);
 		break;
 	}
 
@@ -828,11 +801,18 @@ static const struct v4l2_ctrl_ops gc2607_ctrl_ops = {
 	.s_ctrl = gc2607_s_ctrl,
 };
 
+static const struct v4l2_subdev_core_ops gc2607_core_ops = {
+	.log_status = v4l2_ctrl_subdev_log_status,
+	.subscribe_event = v4l2_ctrl_subdev_subscribe_event,
+	.unsubscribe_event = v4l2_event_subdev_unsubscribe,
+};
+
 static const struct v4l2_subdev_video_ops gc2607_video_ops = {
 	.s_stream = gc2607_s_stream,
 };
 
 static const struct v4l2_subdev_ops gc2607_subdev_ops = {
+	.core = &gc2607_core_ops,
 	.video = &gc2607_video_ops,
 	.pad = &gc2607_pad_ops,
 };
@@ -844,38 +824,25 @@ static int gc2607_detect(struct gc2607 *gc2607)
 {
 	struct i2c_client *client = gc2607->client;
 	u8 chip_id_h = 0, chip_id_l = 0;
+	u16 chip_id;
 	int ret;
 
-	dev_info(&client->dev, "Detecting chip ID...\n");
-
 	ret = gc2607_read_reg(gc2607, GC2607_REG_CHIP_ID_H, &chip_id_h);
-	if (ret) {
-		dev_err(&client->dev, "Failed to read chip ID high byte: %d\n", ret);
-		dev_err(&client->dev, "This usually means:\n");
-		dev_err(&client->dev, "  - Sensor is not powered\n");
-		dev_err(&client->dev, "  - Wrong I2C address (currently 0x%02x)\n", client->addr);
-		dev_err(&client->dev, "  - I2C bus issue\n");
+	if (ret)
 		return ret;
-	}
 
 	ret = gc2607_read_reg(gc2607, GC2607_REG_CHIP_ID_L, &chip_id_l);
-	if (ret) {
-		dev_err(&client->dev, "Failed to read chip ID low byte: %d\n", ret);
+	if (ret)
 		return ret;
-	}
 
-	dev_info(&client->dev, "Read chip ID: 0x%02x%02x\n", chip_id_h, chip_id_l);
-
-	if (chip_id_h != GC2607_CHIP_ID_H || chip_id_l != GC2607_CHIP_ID_L) {
-		dev_err(&client->dev,
-			"Wrong chip ID: expected 0x%02x%02x, got 0x%02x%02x\n",
-			GC2607_CHIP_ID_H, GC2607_CHIP_ID_L,
-			chip_id_h, chip_id_l);
+	chip_id = (chip_id_h << 8) | chip_id_l;
+	if (chip_id != GC2607_CHIP_ID) {
+		dev_err(&client->dev, "Wrong chip ID: expected 0x%04x, got 0x%04x\n",
+			GC2607_CHIP_ID, chip_id);
 		return -ENODEV;
 	}
 
-	dev_info(&client->dev, "GC2607 chip detected successfully!\n");
-
+	dev_dbg(&client->dev, "GC2607 chip detected (0x%04x)\n", chip_id);
 	return 0;
 }
 
@@ -884,8 +851,7 @@ static int gc2607_detect(struct gc2607 *gc2607)
  */
 static int gc2607_runtime_suspend(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct v4l2_subdev *sd = i2c_get_clientdata(client);
+	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct gc2607 *gc2607 = to_gc2607(sd);
 
 	gc2607_power_off(gc2607);
@@ -894,8 +860,7 @@ static int gc2607_runtime_suspend(struct device *dev)
 
 static int gc2607_runtime_resume(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct v4l2_subdev *sd = i2c_get_clientdata(client);
+	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct gc2607 *gc2607 = to_gc2607(sd);
 
 	return gc2607_power_on(gc2607);
@@ -906,123 +871,91 @@ static const struct dev_pm_ops gc2607_pm_ops = {
 };
 
 /*
- * I2C driver probe/remove
+ * Validate the firmware-described hardware configuration: external clock rate,
+ * number of MIPI data lanes, and that the firmware advertises our link freq.
  */
-static int gc2607_probe(struct i2c_client *client)
+static int gc2607_check_hwcfg(struct device *dev, struct gc2607 *gc2607)
 {
-	struct device *dev = &client->dev;
-	struct gc2607 *gc2607;
+	struct fwnode_handle *ep, *fwnode = dev_fwnode(dev);
+	struct v4l2_fwnode_endpoint bus_cfg = {
+		.bus_type = V4L2_MBUS_CSI2_DPHY,
+	};
+	unsigned long link_freq_bitmap;
+	u32 xclk_freq;
+	int ret;
+
+	if (!fwnode)
+		return -ENXIO;
+
+	/* External clock: from the INT3472 platform clock (ACPI) or the
+	 * "clock-frequency" property (DT).
+	 */
+	if (gc2607->xclk)
+		xclk_freq = clk_get_rate(gc2607->xclk);
+	else if (fwnode_property_read_u32(fwnode, "clock-frequency", &xclk_freq))
+		return dev_err_probe(dev, -EINVAL,
+				     "no external clock or clock-frequency\n");
+
+	if (xclk_freq != GC2607_XCLK_FREQ)
+		return dev_err_probe(dev, -EINVAL,
+				     "external clock %u Hz, expected %u Hz\n",
+				     xclk_freq, GC2607_XCLK_FREQ);
+
+	ep = fwnode_graph_get_next_endpoint(fwnode, NULL);
+	if (!ep)
+		return dev_err_probe(dev, -EPROBE_DEFER, "no endpoint found\n");
+
+	ret = v4l2_fwnode_endpoint_alloc_parse(ep, &bus_cfg);
+	fwnode_handle_put(ep);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to parse endpoint\n");
+
+	if (bus_cfg.bus.mipi_csi2.num_data_lanes != GC2607_DATA_LANES) {
+		ret = dev_err_probe(dev, -EINVAL, "got %u data lanes, expected %u\n",
+				    bus_cfg.bus.mipi_csi2.num_data_lanes,
+				    GC2607_DATA_LANES);
+		goto out;
+	}
+
+	ret = v4l2_link_freq_to_bitmap(dev, bus_cfg.link_frequencies,
+				       bus_cfg.nr_of_link_frequencies,
+				       gc2607_link_freqs,
+				       ARRAY_SIZE(gc2607_link_freqs),
+				       &link_freq_bitmap);
+out:
+	v4l2_fwnode_endpoint_free(&bus_cfg);
+	return ret;
+}
+
+static int gc2607_init_controls(struct gc2607 *gc2607)
+{
+	struct v4l2_ctrl_handler *hdl = &gc2607->ctrls;
 	struct v4l2_ctrl *ctrl;
 	int ret;
 
-	dev_info(dev, "GC2607 probe started\n");
-
-	gc2607 = devm_kzalloc(dev, sizeof(*gc2607), GFP_KERNEL);
-	if (!gc2607)
-		return -ENOMEM;
-
-	gc2607->client = client;
-
-	/* Initialize regulator supply names */
-	gc2607->supplies[0].supply = "avdd";  /* Analog power */
-	gc2607->supplies[1].supply = "dovdd"; /* I/O power */
-	gc2607->supplies[2].supply = "dvdd";  /* Digital core power */
-
-	/* Get regulators (optional - INT3472 may handle power internally) */
-	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(gc2607->supplies),
-				       gc2607->supplies);
-	if (ret) {
-		dev_warn(dev, "Regulators not available (%d), assuming INT3472 handles power\n", ret);
-		/* Clear supplies array to indicate no regulators */
-		memset(gc2607->supplies, 0, sizeof(gc2607->supplies));
-	} else {
-		dev_info(dev, "Got %d regulators from platform\n",
-			 (int)ARRAY_SIZE(gc2607->supplies));
-	}
-
-	/* Get reset GPIO (optional on some platforms) */
-	gc2607->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
-	if (IS_ERR(gc2607->reset_gpio)) {
-		ret = PTR_ERR(gc2607->reset_gpio);
-		dev_err(dev, "Failed to get reset GPIO: %d\n", ret);
+	ret = v4l2_ctrl_handler_init(hdl, 8);
+	if (ret)
 		return ret;
-	}
 
-	if (gc2607->reset_gpio)
-		dev_info(dev, "Got reset GPIO\n");
-	else
-		dev_warn(dev, "No reset GPIO, assuming INT3472 handles it\n");
+	/* Serialize control writes with s_stream via our own mutex. */
+	hdl->lock = &gc2607->mutex;
 
-	/* Get powerdown GPIO (optional - active high: 1=powerdown, 0=running) */
-	gc2607->powerdown_gpio = devm_gpiod_get_optional(dev, "powerdown",
-							  GPIOD_OUT_LOW);
-	if (IS_ERR(gc2607->powerdown_gpio)) {
-		ret = PTR_ERR(gc2607->powerdown_gpio);
-		dev_err(dev, "Failed to get powerdown GPIO: %d\n", ret);
-		return ret;
-	}
-
-	if (gc2607->powerdown_gpio)
-		dev_info(dev, "Got powerdown GPIO\n");
-	else
-		dev_dbg(dev, "No powerdown GPIO\n");
-
-	/* Get master clock (optional - INT3472 may provide it internally) */
-	gc2607->xclk = devm_clk_get_optional(dev, NULL);
-	if (IS_ERR(gc2607->xclk)) {
-		ret = PTR_ERR(gc2607->xclk);
-		dev_err(dev, "Failed to get clock: %d\n", ret);
-		return ret;
-	}
-
-	if (gc2607->xclk) {
-		dev_info(dev, "Got clock from platform: %lu Hz\n",
-			 clk_get_rate(gc2607->xclk));
-	} else {
-		dev_warn(dev, "No clock from platform, assuming INT3472 provides it\n");
-	}
-
-	dev_info(dev, "Resources acquired successfully\n");
-
-	/* Initialize V4L2 subdev */
-	v4l2_i2c_subdev_init(&gc2607->sd, client, &gc2607_subdev_ops);
-	gc2607->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
-
-	/* Initialize media pad */
-	gc2607->pad.flags = MEDIA_PAD_FL_SOURCE;
-	gc2607->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
-	ret = media_entity_pads_init(&gc2607->sd.entity, 1, &gc2607->pad);
-	if (ret) {
-		dev_err(dev, "Failed to init media entity: %d\n", ret);
-		return ret;
-	}
-
-	/* Initialize control handler with V4L2 controls */
-	v4l2_ctrl_handler_init(&gc2607->ctrls, 6);
-
-	/* Link frequency control (required by IPU6) */
-	gc2607->link_freq = v4l2_ctrl_new_int_menu(&gc2607->ctrls,
-						    NULL,
-						    V4L2_CID_LINK_FREQ,
-						    ARRAY_SIZE(gc2607_link_freqs) - 1,
-						    0,
-						    gc2607_link_freqs);
+	/* Link frequency (required by IPU6) */
+	gc2607->link_freq = v4l2_ctrl_new_int_menu(hdl, NULL, V4L2_CID_LINK_FREQ,
+						   ARRAY_SIZE(gc2607_link_freqs) - 1,
+						   0, gc2607_link_freqs);
 	if (gc2607->link_freq)
 		gc2607->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
-	/* Pixel rate control (required by IPU6) */
-	gc2607->pixel_rate = v4l2_ctrl_new_std(&gc2607->ctrls,
-						NULL,
-						V4L2_CID_PIXEL_RATE,
-						GC2607_PIXEL_RATE,
-						GC2607_PIXEL_RATE,
-						1,
-						GC2607_PIXEL_RATE);
+	/* Pixel rate (required by IPU6) */
+	gc2607->pixel_rate = v4l2_ctrl_new_std(hdl, NULL, V4L2_CID_PIXEL_RATE,
+					       GC2607_PIXEL_RATE, GC2607_PIXEL_RATE,
+					       1, GC2607_PIXEL_RATE);
 	if (gc2607->pixel_rate)
 		gc2607->pixel_rate->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
 	/* HBLANK: read-only (line length is fixed for this mode -> llp). */
-	ctrl = v4l2_ctrl_new_std(&gc2607->ctrls, NULL, V4L2_CID_HBLANK,
+	ctrl = v4l2_ctrl_new_std(hdl, NULL, V4L2_CID_HBLANK,
 				 GC2607_HBLANK, GC2607_HBLANK, 1, GC2607_HBLANK);
 	if (ctrl)
 		ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
@@ -1031,61 +964,125 @@ static int gc2607_probe(struct i2c_client *client)
 	 * exposure in low light -> less gain -> less noise. Drives VTS; exposure
 	 * max tracks it (see gc2607_s_ctrl).
 	 */
-	gc2607->vblank = v4l2_ctrl_new_std(&gc2607->ctrls, &gc2607_ctrl_ops,
-					   V4L2_CID_VBLANK, GC2607_VBLANK,
-					   GC2607_VBLANK_MAX, 1, GC2607_VBLANK);
+	gc2607->vblank = v4l2_ctrl_new_std(hdl, &gc2607_ctrl_ops, V4L2_CID_VBLANK,
+					   GC2607_VBLANK, GC2607_VBLANK_MAX, 1,
+					   GC2607_VBLANK);
 
-	/* Exposure control */
-	gc2607->exposure = v4l2_ctrl_new_std(&gc2607->ctrls,
-					      &gc2607_ctrl_ops,
-					      V4L2_CID_EXPOSURE,
-					      GC2607_EXPOSURE_MIN,
-					      GC2607_EXPOSURE_MAX,
-					      GC2607_EXPOSURE_STEP,
-					      GC2607_EXPOSURE_DEFAULT);
+	gc2607->exposure = v4l2_ctrl_new_std(hdl, &gc2607_ctrl_ops,
+					     V4L2_CID_EXPOSURE,
+					     GC2607_EXPOSURE_MIN, GC2607_EXPOSURE_MAX,
+					     GC2607_EXPOSURE_STEP, GC2607_EXPOSURE_DEFAULT);
 
-	/* Analog gain control (1/64 units, matches the .aiqb CMC) */
-	gc2607->gain = v4l2_ctrl_new_std(&gc2607->ctrls,
-					  &gc2607_ctrl_ops,
-					  V4L2_CID_ANALOGUE_GAIN,
-					  GC2607_ANA_GAIN_MIN,
-					  GC2607_ANA_GAIN_MAX,
-					  GC2607_ANA_GAIN_STEP,
-					  GC2607_ANA_GAIN_DEFAULT);
+	/* Analog gain in 1/64 units (matches the .aiqb CMC) */
+	gc2607->analogue_gain = v4l2_ctrl_new_std(hdl, &gc2607_ctrl_ops,
+						  V4L2_CID_ANALOGUE_GAIN,
+						  GC2607_ANA_GAIN_MIN, GC2607_ANA_GAIN_MAX,
+						  GC2607_ANA_GAIN_STEP, GC2607_ANA_GAIN_DEFAULT);
 
-	/* Digital gain control: fixed at 1.0x per the .aiqb, exposed only so the
-	 * HAL's per-frame V4L2_CID_DIGITAL_GAIN writes don't return EINVAL.
+	/* Digital gain: fixed at 1.0x per the .aiqb, exposed only so the HAL's
+	 * per-frame V4L2_CID_DIGITAL_GAIN writes don't return EINVAL.
 	 */
-	gc2607->digital_gain = v4l2_ctrl_new_std(&gc2607->ctrls,
-						 &gc2607_ctrl_ops,
+	gc2607->digital_gain = v4l2_ctrl_new_std(hdl, &gc2607_ctrl_ops,
 						 V4L2_CID_DIGITAL_GAIN,
-						 GC2607_DIG_GAIN_MIN,
-						 GC2607_DIG_GAIN_MAX,
-						 GC2607_DIG_GAIN_STEP,
-						 GC2607_DIG_GAIN_DEFAULT);
+						 GC2607_DIG_GAIN_MIN, GC2607_DIG_GAIN_MAX,
+						 GC2607_DIG_GAIN_STEP, GC2607_DIG_GAIN_DEFAULT);
 
-	gc2607->sd.ctrl_handler = &gc2607->ctrls;
+	if (hdl->error) {
+		ret = hdl->error;
+		v4l2_ctrl_handler_free(hdl);
+		return ret;
+	}
 
-	if (gc2607->ctrls.error) {
-		ret = gc2607->ctrls.error;
-		dev_err(dev, "Control handler init failed: %d\n", ret);
+	gc2607->sd.ctrl_handler = hdl;
+	return 0;
+}
+
+/*
+ * I2C driver probe/remove
+ */
+static int gc2607_probe(struct i2c_client *client)
+{
+	struct device *dev = &client->dev;
+	struct gc2607 *gc2607;
+	int ret;
+
+	gc2607 = devm_kzalloc(dev, sizeof(*gc2607), GFP_KERNEL);
+	if (!gc2607)
+		return -ENOMEM;
+
+	gc2607->client = client;
+	gc2607->cur_mode = &gc2607_modes[0];
+	mutex_init(&gc2607->mutex);
+
+	/* Regulator supplies (optional - INT3472 may handle power internally) */
+	gc2607->supplies[0].supply = "avdd";  /* Analog power */
+	gc2607->supplies[1].supply = "dovdd"; /* I/O power */
+	gc2607->supplies[2].supply = "dvdd";  /* Digital core power */
+
+	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(gc2607->supplies),
+				      gc2607->supplies);
+	if (ret) {
+		dev_dbg(dev, "Regulators not available (%d), assuming INT3472 handles power\n", ret);
+		memset(gc2607->supplies, 0, sizeof(gc2607->supplies));
+	}
+
+	/* Reset GPIO (optional - INT3472 may drive it) */
+	gc2607->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
+	if (IS_ERR(gc2607->reset_gpio)) {
+		ret = PTR_ERR(gc2607->reset_gpio);
+		goto err_mutex;
+	}
+
+	/* Powerdown GPIO (optional - active high: 1=powerdown, 0=running) */
+	gc2607->powerdown_gpio = devm_gpiod_get_optional(dev, "powerdown",
+							 GPIOD_OUT_LOW);
+	if (IS_ERR(gc2607->powerdown_gpio)) {
+		ret = PTR_ERR(gc2607->powerdown_gpio);
+		goto err_mutex;
+	}
+
+	/* Master clock (optional - INT3472 may provide it internally) */
+	gc2607->xclk = devm_clk_get_optional(dev, NULL);
+	if (IS_ERR(gc2607->xclk)) {
+		ret = PTR_ERR(gc2607->xclk);
+		goto err_mutex;
+	}
+
+	ret = gc2607_check_hwcfg(dev, gc2607);
+	if (ret)
+		goto err_mutex;
+
+	/* Initialize V4L2 subdev */
+	v4l2_i2c_subdev_init(&gc2607->sd, client, &gc2607_subdev_ops);
+	gc2607->sd.internal_ops = &gc2607_internal_ops;
+	gc2607->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE | V4L2_SUBDEV_FL_HAS_EVENTS;
+
+	ret = gc2607_init_controls(gc2607);
+	if (ret) {
+		dev_err(dev, "Failed to init controls: %d\n", ret);
+		goto err_mutex;
+	}
+
+	/* Initialize media pad */
+	gc2607->pad.flags = MEDIA_PAD_FL_SOURCE;
+	gc2607->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
+	ret = media_entity_pads_init(&gc2607->sd.entity, 1, &gc2607->pad);
+	if (ret) {
+		dev_err(dev, "Failed to init media entity: %d\n", ret);
+		goto err_ctrls;
+	}
+
+	ret = v4l2_subdev_init_finalize(&gc2607->sd);
+	if (ret) {
+		dev_err(dev, "Failed to finalize subdev: %d\n", ret);
 		goto err_media;
 	}
 
-	/* Initialize current mode and format */
-	gc2607->cur_mode = &gc2607_modes[0];
-	gc2607->fmt.width = gc2607->cur_mode->width;
-	gc2607->fmt.height = gc2607->cur_mode->height;
-	gc2607->fmt.code = MEDIA_BUS_FMT_SGRBG10_1X10;
-	gc2607->fmt.field = V4L2_FIELD_NONE;
-	gc2607->fmt.colorspace = V4L2_COLORSPACE_RAW;
-
-	/* Enable runtime PM */
+	/* Enable runtime PM and power on to detect the chip ID */
 	pm_runtime_set_active(dev);
 	pm_runtime_enable(dev);
 	pm_runtime_idle(dev);
 
-	/* Power on sensor and detect chip ID */
 	ret = pm_runtime_resume_and_get(dev);
 	if (ret) {
 		dev_err(dev, "Failed to power on sensor: %d\n", ret);
@@ -1098,20 +1095,15 @@ static int gc2607_probe(struct i2c_client *client)
 		goto err_power;
 	}
 
-	/* Power off after detection */
 	pm_runtime_put(dev);
 
-	/* Register async subdev for IPU6 integration */
 	ret = v4l2_async_register_subdev(&gc2607->sd);
 	if (ret) {
 		dev_err(dev, "Failed to register async subdev: %d\n", ret);
 		goto err_power;
 	}
 
-	dev_info(dev, "GC2607 probe successful\n");
-	dev_info(dev, "  I2C address: 0x%02x\n", client->addr);
-	dev_info(dev, "  I2C adapter: %s\n", client->adapter->name);
-	dev_info(dev, "  Format: SGRBG10 %ux%u@%ufps\n",
+	dev_info(dev, "GC2607 probed (SGRBG10 %ux%u@%ufps)\n",
 		 gc2607->cur_mode->width, gc2607->cur_mode->height,
 		 gc2607->cur_mode->max_fps);
 
@@ -1122,9 +1114,13 @@ err_power:
 err_pm:
 	pm_runtime_disable(dev);
 	pm_runtime_set_suspended(dev);
-	v4l2_ctrl_handler_free(&gc2607->ctrls);
+	v4l2_subdev_cleanup(&gc2607->sd);
 err_media:
 	media_entity_cleanup(&gc2607->sd.entity);
+err_ctrls:
+	v4l2_ctrl_handler_free(&gc2607->ctrls);
+err_mutex:
+	mutex_destroy(&gc2607->mutex);
 	return ret;
 }
 
@@ -1134,33 +1130,25 @@ static void gc2607_remove(struct i2c_client *client)
 	struct gc2607 *gc2607 = to_gc2607(sd);
 	struct device *dev = &client->dev;
 
-	dev_info(dev, "GC2607 driver removing\n");
-
 	v4l2_async_unregister_subdev(sd);
+	v4l2_subdev_cleanup(sd);
 	media_entity_cleanup(&sd->entity);
 	v4l2_ctrl_handler_free(&gc2607->ctrls);
 
-	/* Disable runtime PM */
 	pm_runtime_disable(dev);
 	if (!pm_runtime_status_suspended(dev))
 		gc2607_power_off(gc2607);
 	pm_runtime_set_suspended(dev);
 
-	dev_info(dev, "GC2607 driver removed\n");
+	mutex_destroy(&gc2607->mutex);
 }
 
-/*
- * ACPI match table for Huawei MateBook Pro
- */
 static const struct acpi_device_id gc2607_acpi_ids[] = {
 	{ "GCTI2607" },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, gc2607_acpi_ids);
 
-/*
- * I2C device ID table
- */
 static const struct i2c_device_id gc2607_id[] = {
 	{ "gc2607", 0 },
 	{ }
@@ -1181,5 +1169,5 @@ static struct i2c_driver gc2607_i2c_driver = {
 module_i2c_driver(gc2607_i2c_driver);
 
 MODULE_DESCRIPTION("GalaxyCore GC2607 sensor driver");
-MODULE_AUTHOR("Your Name <your.email@example.com>");
+MODULE_AUTHOR("Alex Daichendt <alex@daichendt.one>");
 MODULE_LICENSE("GPL");

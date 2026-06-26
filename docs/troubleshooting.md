@@ -162,9 +162,11 @@ cmake -S . -B build-gc2607 -DCMAKE_CXX_FLAGS="-Wno-error" ...
 
 ## GC2607 DKMS Build Complains About A Missing dkms.conf
 
-The upstream `gc2607-v4l2-driver` tree does not ship a `dkms.conf`. This repo bundles one at
-`config/dkms/gc2607-dkms.conf`, and `scripts/install-gc2607-dkms.sh` falls back to it
-automatically. Override with `DKMS_CONF=/path/to/dkms.conf` if you maintain your own.
+The `dkms.conf` ships at the root of the `gc2607-kernel/` driver tree, alongside `gc2607.c` and the
+`Makefile`. `scripts/install-gc2607-dkms.sh` symlinks that tree into `/usr/src/gc2607-<version>` and
+runs `dkms add`/`dkms install`, so the version and toolchain flag (`LLVM=1` only on clang-built
+kernels) are derived automatically. If the build can't find it, make sure you're pointing `DRIVER`
+at a tree that contains `dkms.conf`.
 
 ## Raw Capture Works But HAL Does Not
 
