@@ -15,6 +15,8 @@
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
+#include <linux/regmap.h>
+#include <media/v4l2-cci.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-event.h>
@@ -22,24 +24,20 @@
 #include <media/v4l2-async.h>
 
 #define GC2607_CHIP_ID			0x2607
-#define GC2607_REG_CHIP_ID_H		0x03f0
-#define GC2607_REG_CHIP_ID_L		0x03f1
-
-/* Special register markers for initialization arrays */
-#define GC2607_REG_END			0xffff
-#define GC2607_REG_DELAY		0x0000
+#define GC2607_REG_CHIP_ID_H		CCI_REG16(0x03f0)
+#define GC2607_REG_CHIP_ID_L		CCI_REG16(0x03f1)
 
 /* Exposure and gain registers (datasheet section 9.6 + register list) */
-#define GC2607_REG_EXPOSURE_H		0x0202	/* CISCTL_exp[14:8] */
-#define GC2607_REG_EXPOSURE_L		0x0203	/* CISCTL_exp[7:0] */
-#define GC2607_REG_AGAIN_H		0x02b3	/* ANALOG_PGA_gain_T1 */
-#define GC2607_REG_AGAIN_L		0x02b4
-#define GC2607_REG_DGAIN_H		0x020c	/* col_gain_T1 (analog fine-trim) */
-#define GC2607_REG_DGAIN_L		0x020d
-#define GC2607_REG_FLL_H		0x0340	/* frame_length[14:8] (documented) */
-#define GC2607_REG_FLL_L		0x0341
-#define GC2607_REG_VTS_H		0x0220	/* undocumented frame-length mirror */
-#define GC2607_REG_VTS_L		0x0221	/* (kept from the reference init) */
+#define GC2607_REG_EXPOSURE_H		CCI_REG16(0x0202)	/* CISCTL_exp[14:8] */
+#define GC2607_REG_EXPOSURE_L		CCI_REG16(0x0203)	/* CISCTL_exp[7:0] */
+#define GC2607_REG_AGAIN_H		CCI_REG16(0x02b3)	/* ANALOG_PGA_gain_T1 */
+#define GC2607_REG_AGAIN_L		CCI_REG16(0x02b4)
+#define GC2607_REG_DGAIN_H		CCI_REG16(0x020c)	/* col_gain_T1 (analog fine-trim) */
+#define GC2607_REG_DGAIN_L		CCI_REG16(0x020d)
+#define GC2607_REG_FLL_H		CCI_REG16(0x0340)	/* frame_length[14:8] (documented) */
+#define GC2607_REG_FLL_L		CCI_REG16(0x0341)
+#define GC2607_REG_VTS_H		CCI_REG16(0x0220)	/* undocumented frame-length mirror */
+#define GC2607_REG_VTS_L		CCI_REG16(0x0221)	/* (kept from the reference init) */
 
 /* External clock the shipped init/timing assumes. The sensor itself accepts
  * 6..27 MHz (datasheet typ 24 MHz), but the PLL block in the init array only
@@ -99,12 +97,6 @@
  */
 #define GC2607_PIXEL_RATE		((s64)GC2607_HTS * GC2607_VTS * 30)  /* ~65.6 MHz */
 #define GC2607_LINK_FREQ		336000000LL  /* 672 Mbps / 2 lanes */
-
-/* Register value pair for initialization sequences */
-struct gc2607_regval {
-	u16 addr;
-	u8 val;
-};
 
 /* Gain lookup table entry. The again pipeline uses four registers together
  * (0x02b3/0x02b4 analog stage + 0x020c/0x020d digital fine-trim); 'code' is the
@@ -168,13 +160,15 @@ struct gc2607_mode {
 	u32 hts;
 	u32 vts;
 	u32 max_fps;
-	const struct gc2607_regval *reg_list;
+	u32 num_regs;
+	const struct cci_reg_sequence *reg_list;
 };
 
 struct gc2607 {
 	struct v4l2_subdev sd;
 	struct media_pad pad;
 	struct i2c_client *client;
+	struct regmap *regmap;
 
 	/* Serializes s_stream against control writes (also the ctrl handler lock) */
 	struct mutex mutex;
@@ -208,217 +202,132 @@ static inline struct gc2607 *to_gc2607(struct v4l2_subdev *sd)
 }
 
 /*
- * I2C I/O operations
- * GC2607 uses 16-bit register addresses and 8-bit values
- */
-static int gc2607_read_reg(struct gc2607 *gc2607, u16 reg, u8 *val)
-{
-	struct i2c_client *client = gc2607->client;
-	struct i2c_msg msgs[2];
-	u8 addr_buf[2];
-	int ret;
-
-	addr_buf[0] = reg >> 8;
-	addr_buf[1] = reg & 0xff;
-
-	/* Write register address */
-	msgs[0].addr = client->addr;
-	msgs[0].flags = 0;
-	msgs[0].len = 2;
-	msgs[0].buf = addr_buf;
-
-	/* Read data */
-	msgs[1].addr = client->addr;
-	msgs[1].flags = I2C_M_RD;
-	msgs[1].len = 1;
-	msgs[1].buf = val;
-
-	ret = i2c_transfer(client->adapter, msgs, 2);
-	if (ret < 0) {
-		dev_err(&client->dev, "Failed to read reg 0x%04x: %d\n", reg, ret);
-		return ret;
-	}
-
-	return 0;
-}
-
-static int gc2607_write_reg(struct gc2607 *gc2607, u16 reg, u8 val)
-{
-	struct i2c_client *client = gc2607->client;
-	u8 buf[3];
-	int ret;
-
-	buf[0] = reg >> 8;
-	buf[1] = reg & 0xff;
-	buf[2] = val;
-
-	ret = i2c_master_send(client, buf, 3);
-	if (ret < 0) {
-		dev_err(&client->dev, "Failed to write reg 0x%04x: %d\n", reg, ret);
-		return ret;
-	}
-
-	return 0;
-}
-
-/*
- * Write an array of registers.
- * Handles special markers: GC2607_REG_DELAY for delays, GC2607_REG_END for end.
- */
-static int gc2607_write_array(struct gc2607 *gc2607,
-			      const struct gc2607_regval *regs)
-{
-	struct i2c_client *client = gc2607->client;
-	int ret;
-	u32 i;
-
-	for (i = 0; regs[i].addr != GC2607_REG_END; i++) {
-		if (regs[i].addr == GC2607_REG_DELAY) {
-			msleep(regs[i].val);
-			continue;
-		}
-
-		ret = gc2607_write_reg(gc2607, regs[i].addr, regs[i].val);
-		if (ret < 0) {
-			dev_err(&client->dev,
-				"Failed to write reg 0x%04x at index %u: %d\n",
-				regs[i].addr, i, ret);
-			return ret;
-		}
-	}
-
-	dev_dbg(&client->dev, "Wrote %u registers\n", i);
-	return 0;
-}
-
-/*
  * Register initialization sequence for 1920x1080@30fps MIPI mode.
  * Derived from the GalaxyCore reference init, with blanking retuned for 30 fps
  * at this board's 19.2 MHz MCLK (see README / FINDINGS).
  */
-static const struct gc2607_regval gc2607_1080p_30fps_regs[] = {
-	{0x03fe, 0xf0},
-	{0x03fe, 0xf0},
-	{0x03fe, 0x00},
-	{0x03fe, 0x00},
-	{0x03fe, 0x00},
-	{0x03fe, 0x00},
-	{0x0d06, 0x01},
-	{0x0315, 0xd4},
-	{0x0d82, 0x14},
-	{0x0a70, 0x80},
-	{0x0134, 0x5b},
-	{0x0110, 0x01},
-	{0x0dd1, 0x56},
-	{0x0137, 0x03},
-	{0x0135, 0x01},
-	{0x0136, 0x2a},
-	{0x0130, 0x08},
-	{0x0132, 0x01},
-	{0x031c, 0x93},
-	{0x0218, 0x00},
-	{0x0340, 0x04},  /* frame length 0x045c = 1116 */
-	{0x0341, 0x5c},
-	{0x0342, 0x07},  /* HTS 0x07a7 = 1959 (tight h-blank for 30fps) */
-	{0x0343, 0xa7},
-	{0x0220, 0x04},  /* VTS 0x045c = 1116 (min frame length -> 30.0 fps) */
-	{0x0221, 0x5c},
-	{0x0af4, 0x2b},
-	{0x0002, 0x30},
-	{0x00c3, 0x3c},
-	{0x0101, 0x00},
-	{0x0d05, 0xcc},
-	{0x0218, 0x00},
-	{0x005e, 0x84},
-	{0x0007, 0x15},
-	{0x0350, 0x01},
-	{0x00c0, 0x07},
-	{0x00c1, 0x90},
-	{0x0346, 0x00},
-	{0x0347, 0x02},
-	{0x034a, 0x04},
-	{0x034b, 0x40},
-	{0x021f, 0x12},
-	{0x034c, 0x07},
-	{0x034d, 0x80},
-	{0x0353, 0x00},
-	{0x0354, 0x04},
-	{0x0d11, 0x10},
-	{0x0d22, 0x00},
-	{0x03f6, 0x4d},
-	{0x03f5, 0x3c},
-	{0x03f3, 0x54},
-	{0x0d07, 0xdd},
-	{0x0e71, 0x00},
-	{0x0e72, 0x10},
-	{0x0e17, 0x26},
-	{0x0e22, 0x0d},
-	{0x0e23, 0x20},
-	{0x0e1b, 0x30},
-	{0x0e3a, 0x15},
-	{0x0e0a, 0x00},
-	{0x0e0b, 0x00},
-	{0x0e0e, 0x00},
-	{0x0e2a, 0x08},
-	{0x0e2b, 0x08},
-	{0x0d02, 0x73},
-	{0x0d22, 0x38},
-	{0x0d25, 0x00},
-	{0x0e6a, 0x39},
-	{0x0050, 0x05},
-	{0x0089, 0x03},
-	{0x0070, 0x40},
-	{0x0071, 0x40},
-	{0x0072, 0x40},
-	{0x0073, 0x40},
-	{0x0040, 0x82},
-	{0x0030, 0x80},
-	{0x0031, 0x80},
-	{0x0032, 0x80},
-	{0x0033, 0x80},
-	{0x0202, 0x04},  /* Exposure high byte */
-	{0x0203, 0x38},  /* Exposure low byte = 1080 */
-	{0x02b3, 0x00},
-	{0x02b3, 0x00},
-	{0x02b4, 0x00},
-	{0x0208, 0x04},
-	{0x0209, 0x00},
-	{0x009e, 0x01},
-	{0x009f, 0xa0},
-	{0x0db8, 0x08},
-	{0x0db6, 0x02},
-	{0x0db4, 0x05},
-	{0x0db5, 0x16},
-	{0x0db9, 0x09},
-	{0x0d93, 0x05},
-	{0x0d94, 0x06},
-	{0x0d95, 0x0b},
-	{0x0d99, 0x10},
-	{0x0082, 0x03},
-	{0x0107, 0x05},
-	{0x0117, 0x01},
-	{0x0d80, 0x07},
-	{0x0d81, 0x02},
-	{0x0d84, 0x09},
-	{0x0d85, 0x60},
-	{0x0d86, 0x04},
-	{0x0d87, 0xb1},
-	{0x0222, 0x00},
-	{0x0223, 0x01},
-	{0x0117, 0x91},
-	{0x03f4, 0x38},
-	{0x0e69, 0x00},
-	{0x00d6, 0x00},
-	{0x00d0, 0x0d},
-	{0x00e0, 0x18},
-	{0x00e1, 0x18},
-	{0x00e2, 0x18},
-	{0x00e3, 0x18},
-	{0x00e4, 0x18},
-	{0x00e5, 0x18},
-	{0x00e6, 0x18},
-	{0x00e7, 0x18},
-	{GC2607_REG_END, 0x00},
+static const struct cci_reg_sequence gc2607_1080p_30fps_regs[] = {
+	{ CCI_REG16(0x03fe), 0xf0 },
+	{ CCI_REG16(0x03fe), 0xf0 },
+	{ CCI_REG16(0x03fe), 0x00 },
+	{ CCI_REG16(0x03fe), 0x00 },
+	{ CCI_REG16(0x03fe), 0x00 },
+	{ CCI_REG16(0x03fe), 0x00 },
+	{ CCI_REG16(0x0d06), 0x01 },
+	{ CCI_REG16(0x0315), 0xd4 },
+	{ CCI_REG16(0x0d82), 0x14 },
+	{ CCI_REG16(0x0a70), 0x80 },
+	{ CCI_REG16(0x0134), 0x5b },
+	{ CCI_REG16(0x0110), 0x01 },
+	{ CCI_REG16(0x0dd1), 0x56 },
+	{ CCI_REG16(0x0137), 0x03 },
+	{ CCI_REG16(0x0135), 0x01 },
+	{ CCI_REG16(0x0136), 0x2a },
+	{ CCI_REG16(0x0130), 0x08 },
+	{ CCI_REG16(0x0132), 0x01 },
+	{ CCI_REG16(0x031c), 0x93 },
+	{ CCI_REG16(0x0218), 0x00 },
+	{ GC2607_REG_FLL_H, 0x04 },  /* frame length 0x045c = 1116 */
+	{ GC2607_REG_FLL_L, 0x5c },
+	{ CCI_REG16(0x0342), 0x07 },  /* HTS 0x07a7 = 1959 (tight h-blank for 30fps) */
+	{ CCI_REG16(0x0343), 0xa7 },
+	{ GC2607_REG_VTS_H, 0x04 },  /* VTS 0x045c = 1116 (min frame length -> 30.0 fps) */
+	{ GC2607_REG_VTS_L, 0x5c },
+	{ CCI_REG16(0x0af4), 0x2b },
+	{ CCI_REG16(0x0002), 0x30 },
+	{ CCI_REG16(0x00c3), 0x3c },
+	{ CCI_REG16(0x0101), 0x00 },
+	{ CCI_REG16(0x0d05), 0xcc },
+	{ CCI_REG16(0x0218), 0x00 },
+	{ CCI_REG16(0x005e), 0x84 },
+	{ CCI_REG16(0x0007), 0x15 },
+	{ CCI_REG16(0x0350), 0x01 },
+	{ CCI_REG16(0x00c0), 0x07 },
+	{ CCI_REG16(0x00c1), 0x90 },
+	{ CCI_REG16(0x0346), 0x00 },
+	{ CCI_REG16(0x0347), 0x02 },
+	{ CCI_REG16(0x034a), 0x04 },
+	{ CCI_REG16(0x034b), 0x40 },
+	{ CCI_REG16(0x021f), 0x12 },
+	{ CCI_REG16(0x034c), 0x07 },
+	{ CCI_REG16(0x034d), 0x80 },
+	{ CCI_REG16(0x0353), 0x00 },
+	{ CCI_REG16(0x0354), 0x04 },
+	{ CCI_REG16(0x0d11), 0x10 },
+	{ CCI_REG16(0x0d22), 0x00 },
+	{ CCI_REG16(0x03f6), 0x4d },
+	{ CCI_REG16(0x03f5), 0x3c },
+	{ CCI_REG16(0x03f3), 0x54 },
+	{ CCI_REG16(0x0d07), 0xdd },
+	{ CCI_REG16(0x0e71), 0x00 },
+	{ CCI_REG16(0x0e72), 0x10 },
+	{ CCI_REG16(0x0e17), 0x26 },
+	{ CCI_REG16(0x0e22), 0x0d },
+	{ CCI_REG16(0x0e23), 0x20 },
+	{ CCI_REG16(0x0e1b), 0x30 },
+	{ CCI_REG16(0x0e3a), 0x15 },
+	{ CCI_REG16(0x0e0a), 0x00 },
+	{ CCI_REG16(0x0e0b), 0x00 },
+	{ CCI_REG16(0x0e0e), 0x00 },
+	{ CCI_REG16(0x0e2a), 0x08 },
+	{ CCI_REG16(0x0e2b), 0x08 },
+	{ CCI_REG16(0x0d02), 0x73 },
+	{ CCI_REG16(0x0d22), 0x38 },
+	{ CCI_REG16(0x0d25), 0x00 },
+	{ CCI_REG16(0x0e6a), 0x39 },
+	{ CCI_REG16(0x0050), 0x05 },
+	{ CCI_REG16(0x0089), 0x03 },
+	{ CCI_REG16(0x0070), 0x40 },
+	{ CCI_REG16(0x0071), 0x40 },
+	{ CCI_REG16(0x0072), 0x40 },
+	{ CCI_REG16(0x0073), 0x40 },
+	{ CCI_REG16(0x0040), 0x82 },
+	{ CCI_REG16(0x0030), 0x80 },
+	{ CCI_REG16(0x0031), 0x80 },
+	{ CCI_REG16(0x0032), 0x80 },
+	{ CCI_REG16(0x0033), 0x80 },
+	{ GC2607_REG_EXPOSURE_H, 0x04 },  /* Exposure high byte */
+	{ GC2607_REG_EXPOSURE_L, 0x38 },  /* Exposure low byte = 1080 */
+	{ GC2607_REG_AGAIN_H, 0x00 },
+	{ GC2607_REG_AGAIN_H, 0x00 },
+	{ GC2607_REG_AGAIN_L, 0x00 },
+	{ CCI_REG16(0x0208), 0x04 },
+	{ CCI_REG16(0x0209), 0x00 },
+	{ CCI_REG16(0x009e), 0x01 },
+	{ CCI_REG16(0x009f), 0xa0 },
+	{ CCI_REG16(0x0db8), 0x08 },
+	{ CCI_REG16(0x0db6), 0x02 },
+	{ CCI_REG16(0x0db4), 0x05 },
+	{ CCI_REG16(0x0db5), 0x16 },
+	{ CCI_REG16(0x0db9), 0x09 },
+	{ CCI_REG16(0x0d93), 0x05 },
+	{ CCI_REG16(0x0d94), 0x06 },
+	{ CCI_REG16(0x0d95), 0x0b },
+	{ CCI_REG16(0x0d99), 0x10 },
+	{ CCI_REG16(0x0082), 0x03 },
+	{ CCI_REG16(0x0107), 0x05 },
+	{ CCI_REG16(0x0117), 0x01 },
+	{ CCI_REG16(0x0d80), 0x07 },
+	{ CCI_REG16(0x0d81), 0x02 },
+	{ CCI_REG16(0x0d84), 0x09 },
+	{ CCI_REG16(0x0d85), 0x60 },
+	{ CCI_REG16(0x0d86), 0x04 },
+	{ CCI_REG16(0x0d87), 0xb1 },
+	{ CCI_REG16(0x0222), 0x00 },
+	{ CCI_REG16(0x0223), 0x01 },
+	{ CCI_REG16(0x0117), 0x91 },
+	{ CCI_REG16(0x03f4), 0x38 },
+	{ CCI_REG16(0x0e69), 0x00 },
+	{ CCI_REG16(0x00d6), 0x00 },
+	{ CCI_REG16(0x00d0), 0x0d },
+	{ CCI_REG16(0x00e0), 0x18 },
+	{ CCI_REG16(0x00e1), 0x18 },
+	{ CCI_REG16(0x00e2), 0x18 },
+	{ CCI_REG16(0x00e3), 0x18 },
+	{ CCI_REG16(0x00e4), 0x18 },
+	{ CCI_REG16(0x00e5), 0x18 },
+	{ CCI_REG16(0x00e6), 0x18 },
+	{ CCI_REG16(0x00e7), 0x18 },
 };
 
 /* Supported sensor modes */
@@ -429,6 +338,7 @@ static const struct gc2607_mode gc2607_modes[] = {
 		.hts = GC2607_HTS,
 		.vts = GC2607_VTS,
 		.max_fps = 30,
+		.num_regs = ARRAY_SIZE(gc2607_1080p_30fps_regs),
 		.reg_list = gc2607_1080p_30fps_regs,
 	},
 };
@@ -683,7 +593,8 @@ static int gc2607_s_stream(struct v4l2_subdev *sd, int enable)
 		 * written, and stops when the sensor is powered down. So upload
 		 * the mode and apply the current controls here.
 		 */
-		ret = gc2607_write_array(gc2607, gc2607->cur_mode->reg_list);
+		ret = cci_multi_reg_write(gc2607->regmap, gc2607->cur_mode->reg_list,
+					  gc2607->cur_mode->num_regs, NULL);
 		if (ret) {
 			dev_err(&client->dev, "Failed to initialize sensor: %d\n", ret);
 			goto err_pm;
@@ -743,23 +654,27 @@ static int gc2607_s_ctrl(struct v4l2_ctrl *ctrl)
 		/* frame length lives in the documented 0x0340/41 plus the
 		 * reference's 0x0220/21 mirror.
 		 */
-		ret = gc2607_write_reg(gc2607, GC2607_REG_VTS_H, (vts >> 8) & 0x3f);
+		ret = cci_write(gc2607->regmap, GC2607_REG_VTS_H,
+				(vts >> 8) & 0x3f, NULL);
 		if (!ret)
-			ret = gc2607_write_reg(gc2607, GC2607_REG_VTS_L, vts & 0xff);
+			ret = cci_write(gc2607->regmap, GC2607_REG_VTS_L,
+					vts & 0xff, NULL);
 		if (!ret)
-			ret = gc2607_write_reg(gc2607, GC2607_REG_FLL_H, (vts >> 8) & 0x7f);
+			ret = cci_write(gc2607->regmap, GC2607_REG_FLL_H,
+					(vts >> 8) & 0x7f, NULL);
 		if (!ret)
-			ret = gc2607_write_reg(gc2607, GC2607_REG_FLL_L, vts & 0xff);
+			ret = cci_write(gc2607->regmap, GC2607_REG_FLL_L,
+					vts & 0xff, NULL);
 		break;
 	}
 
 	case V4L2_CID_EXPOSURE:
 		/* 15-bit shutter time, high byte is CISCTL_exp[14:8]. */
-		ret = gc2607_write_reg(gc2607, GC2607_REG_EXPOSURE_H,
-				       (ctrl->val >> 8) & 0x7f);
+		ret = cci_write(gc2607->regmap, GC2607_REG_EXPOSURE_H,
+				(ctrl->val >> 8) & 0x7f, NULL);
 		if (!ret)
-			ret = gc2607_write_reg(gc2607, GC2607_REG_EXPOSURE_L,
-					       ctrl->val & 0xff);
+			ret = cci_write(gc2607->regmap, GC2607_REG_EXPOSURE_L,
+					ctrl->val & 0xff, NULL);
 		break;
 
 	case V4L2_CID_ANALOGUE_GAIN: {
@@ -769,13 +684,17 @@ static int gc2607_s_ctrl(struct v4l2_ctrl *ctrl)
 		 */
 		const struct gc2607_gain_lut *lut = gc2607_again_for_code(ctrl->val);
 
-		ret = gc2607_write_reg(gc2607, GC2607_REG_AGAIN_H, lut->reg2b3);
+		ret = cci_write(gc2607->regmap, GC2607_REG_AGAIN_H,
+				lut->reg2b3, NULL);
 		if (!ret)
-			ret = gc2607_write_reg(gc2607, GC2607_REG_AGAIN_L, lut->reg2b4);
+			ret = cci_write(gc2607->regmap, GC2607_REG_AGAIN_L,
+					lut->reg2b4, NULL);
 		if (!ret)
-			ret = gc2607_write_reg(gc2607, GC2607_REG_DGAIN_H, lut->reg20c);
+			ret = cci_write(gc2607->regmap, GC2607_REG_DGAIN_H,
+					lut->reg20c, NULL);
 		if (!ret)
-			ret = gc2607_write_reg(gc2607, GC2607_REG_DGAIN_L, lut->reg20d);
+			ret = cci_write(gc2607->regmap, GC2607_REG_DGAIN_L,
+					lut->reg20d, NULL);
 		break;
 	}
 
@@ -823,19 +742,21 @@ static const struct v4l2_subdev_ops gc2607_subdev_ops = {
 static int gc2607_detect(struct gc2607 *gc2607)
 {
 	struct i2c_client *client = gc2607->client;
-	u8 chip_id_h = 0, chip_id_l = 0;
+	u64 chip_id_h = 0, chip_id_l = 0;
 	u16 chip_id;
 	int ret;
 
-	ret = gc2607_read_reg(gc2607, GC2607_REG_CHIP_ID_H, &chip_id_h);
+	ret = cci_read(gc2607->regmap, GC2607_REG_CHIP_ID_H, &chip_id_h,
+		       NULL);
 	if (ret)
 		return ret;
 
-	ret = gc2607_read_reg(gc2607, GC2607_REG_CHIP_ID_L, &chip_id_l);
+	ret = cci_read(gc2607->regmap, GC2607_REG_CHIP_ID_L, &chip_id_l,
+		       NULL);
 	if (ret)
 		return ret;
 
-	chip_id = (chip_id_h << 8) | chip_id_l;
+	chip_id = ((u16)chip_id_h << 8) | (u16)chip_id_l;
 	if (chip_id != GC2607_CHIP_ID) {
 		dev_err(&client->dev, "Wrong chip ID: expected 0x%04x, got 0x%04x\n",
 			GC2607_CHIP_ID, chip_id);
@@ -1013,6 +934,14 @@ static int gc2607_probe(struct i2c_client *client)
 	gc2607->client = client;
 	gc2607->cur_mode = &gc2607_modes[0];
 	mutex_init(&gc2607->mutex);
+
+	/* CCI/regmap register access (16-bit addresses, 8-bit values) */
+	gc2607->regmap = devm_cci_regmap_init_i2c(client, 16);
+	if (IS_ERR(gc2607->regmap)) {
+		ret = PTR_ERR(gc2607->regmap);
+		dev_err(dev, "Failed to init CCI regmap: %d\n", ret);
+		return ret;
+	}
 
 	/* Regulator supplies (optional - INT3472 may handle power internally) */
 	gc2607->supplies[0].supply = "avdd";  /* Analog power */
