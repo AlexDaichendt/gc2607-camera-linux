@@ -38,6 +38,11 @@
 #define GC2607_REG_FLL_L		CCI_REG16(0x0341)
 #define GC2607_REG_VTS_H		CCI_REG16(0x0220)	/* undocumented frame-length mirror */
 #define GC2607_REG_VTS_L		CCI_REG16(0x0221)	/* (kept from the reference init) */
+#define GC2607_REG_HTS_H		CCI_REG16(0x0342)	/* CISCTL_hb (line period) [11:8]; datasheet default 1200 */
+#define GC2607_REG_HTS_L		CCI_REG16(0x0343)	/* CISCTL_hb [7:0]; tuned to 1959 for 30fps@19.2MHz */
+
+/* Page select / soft-reset (write 0xf0 to reset, 0x00 to select page 0) */
+#define GC2607_REG_PAGE_SELECT		CCI_REG16(0x03fe)
 
 /* External clock the shipped init/timing assumes. The sensor itself accepts
  * 6..27 MHz (datasheet typ 24 MHz), but the PLL block in the init array only
@@ -207,14 +212,19 @@ static inline struct gc2607 *to_gc2607(struct v4l2_subdev *sd)
  * at this board's 19.2 MHz MCLK (see README / FINDINGS).
  */
 static const struct cci_reg_sequence gc2607_1080p_30fps_regs[] = {
-	{ CCI_REG16(0x03fe), 0xf0 },
-	{ CCI_REG16(0x03fe), 0xf0 },
-	{ CCI_REG16(0x03fe), 0x00 },
-	{ CCI_REG16(0x03fe), 0x00 },
-	{ CCI_REG16(0x03fe), 0x00 },
-	{ CCI_REG16(0x03fe), 0x00 },
+	/* Soft reset: two 0xf0 pulses select and reset the chip, then four 0x00
+	 * writes confirm page 0 selection.
+	 */
+	{ GC2607_REG_PAGE_SELECT, 0xf0 },
+	{ GC2607_REG_PAGE_SELECT, 0xf0 },
+	{ GC2607_REG_PAGE_SELECT, 0x00 },
+	{ GC2607_REG_PAGE_SELECT, 0x00 },
+	{ GC2607_REG_PAGE_SELECT, 0x00 },
+	{ GC2607_REG_PAGE_SELECT, 0x00 },
+
+	/* PLL and clock configuration */
 	{ CCI_REG16(0x0d06), 0x01 },
-	{ CCI_REG16(0x0315), 0xd4 },
+	{ CCI_REG16(0x0315), 0xd4 },  /* PLL pre-divider */
 	{ CCI_REG16(0x0d82), 0x14 },
 	{ CCI_REG16(0x0a70), 0x80 },
 	{ CCI_REG16(0x0134), 0x5b },
@@ -226,36 +236,45 @@ static const struct cci_reg_sequence gc2607_1080p_30fps_regs[] = {
 	{ CCI_REG16(0x0130), 0x08 },
 	{ CCI_REG16(0x0132), 0x01 },
 	{ CCI_REG16(0x031c), 0x93 },
+
+	/* Frame timing: FLL (documented), HTS, VTS (undocumented mirror) */
 	{ CCI_REG16(0x0218), 0x00 },
-	{ GC2607_REG_FLL_H, 0x04 },  /* frame length 0x045c = 1116 */
+	{ GC2607_REG_FLL_H, 0x04 },   /* frame length 0x045c = 1116 */
 	{ GC2607_REG_FLL_L, 0x5c },
-	{ CCI_REG16(0x0342), 0x07 },  /* HTS 0x07a7 = 1959 (tight h-blank for 30fps) */
-	{ CCI_REG16(0x0343), 0xa7 },
-	{ GC2607_REG_VTS_H, 0x04 },  /* VTS 0x045c = 1116 (min frame length -> 30.0 fps) */
+	{ GC2607_REG_HTS_H, 0x07 },   /* HTS 0x07a7 = 1959 (tight h-blank for 30fps) */
+	{ GC2607_REG_HTS_L, 0xa7 },
+	{ GC2607_REG_VTS_H, 0x04 },   /* VTS 0x045c = 1116 -> 30.0 fps */
 	{ GC2607_REG_VTS_L, 0x5c },
+
+	/* Output format and windowing */
 	{ CCI_REG16(0x0af4), 0x2b },
 	{ CCI_REG16(0x0002), 0x30 },
 	{ CCI_REG16(0x00c3), 0x3c },
-	{ CCI_REG16(0x0101), 0x00 },
+	{ CCI_REG16(0x0101), 0x00 },  /* Image_Orientation: [1]=updown [0]=mirror; 0x00=normal */
 	{ CCI_REG16(0x0d05), 0xcc },
-	{ CCI_REG16(0x0218), 0x00 },
+	{ CCI_REG16(0x0218), 0x00 },  /* second write from reference; purpose unclear, kept for safety */
 	{ CCI_REG16(0x005e), 0x84 },
 	{ CCI_REG16(0x0007), 0x15 },
 	{ CCI_REG16(0x0350), 0x01 },
-	{ CCI_REG16(0x00c0), 0x07 },
-	{ CCI_REG16(0x00c1), 0x90 },
-	{ CCI_REG16(0x0346), 0x00 },
-	{ CCI_REG16(0x0347), 0x02 },
-	{ CCI_REG16(0x034a), 0x04 },
-	{ CCI_REG16(0x034b), 0x40 },
-	{ CCI_REG16(0x021f), 0x12 },
-	{ CCI_REG16(0x034c), 0x07 },
-	{ CCI_REG16(0x034d), 0x80 },
-	{ CCI_REG16(0x0353), 0x00 },
-	{ CCI_REG16(0x0354), 0x04 },
+	{ CCI_REG16(0x00c0), 0x07 },  /* CISCTL_win_width H: total readout width = 1936 (1920 + 8+8 dummy cols) */
+	{ CCI_REG16(0x00c1), 0x90 },  /* CISCTL_win_width L */
+	{ CCI_REG16(0x0346), 0x00 },  /* CISCTL_row_start H: first active column [10:8] */
+	{ CCI_REG16(0x0347), 0x02 },  /* CISCTL_row_start L: col_start = 2 (skip 2 dummy columns) */
+	{ CCI_REG16(0x034a), 0x04 },  /* CISCTL_win_height H: window height = 1088 (1080 + 8 dummy rows) */
+	{ CCI_REG16(0x034b), 0x40 },  /* CISCTL_win_height L */
+	{ CCI_REG16(0x021f), 0x12 },  /* output format control */
+	{ CCI_REG16(0x034c), 0x07 },  /* output width H (0x0780 = 1920; undocumented in brief) */
+	{ CCI_REG16(0x034d), 0x80 },  /* output width L */
+	{ CCI_REG16(0x0353), 0x00 },  /* column offset H (undocumented) */
+	{ CCI_REG16(0x0354), 0x04 },  /* column offset L */
+
+	/* Sensor analog timing */
 	{ CCI_REG16(0x0d11), 0x10 },
+	/* 0x0d22 is written 0x00 here to reset the ISP block, then 0x38 below
+	 * after the analog timing registers have been configured.
+	 */
 	{ CCI_REG16(0x0d22), 0x00 },
-	{ CCI_REG16(0x03f6), 0x4d },
+	{ CCI_REG16(0x03f6), 0x4d },  /* PLL post-divider */
 	{ CCI_REG16(0x03f5), 0x3c },
 	{ CCI_REG16(0x03f3), 0x54 },
 	{ CCI_REG16(0x0d07), 0xdd },
@@ -271,42 +290,52 @@ static const struct cci_reg_sequence gc2607_1080p_30fps_regs[] = {
 	{ CCI_REG16(0x0e0e), 0x00 },
 	{ CCI_REG16(0x0e2a), 0x08 },
 	{ CCI_REG16(0x0e2b), 0x08 },
+
+	/* ISP control */
 	{ CCI_REG16(0x0d02), 0x73 },
-	{ CCI_REG16(0x0d22), 0x38 },
+	{ CCI_REG16(0x0d22), 0x38 },  /* ISP enable flags (final value) */
 	{ CCI_REG16(0x0d25), 0x00 },
 	{ CCI_REG16(0x0e6a), 0x39 },
+
+	/* Initial gain and AWB coefficients */
 	{ CCI_REG16(0x0050), 0x05 },
 	{ CCI_REG16(0x0089), 0x03 },
-	{ CCI_REG16(0x0070), 0x40 },
-	{ CCI_REG16(0x0071), 0x40 },
-	{ CCI_REG16(0x0072), 0x40 },
-	{ CCI_REG16(0x0073), 0x40 },
+	{ CCI_REG16(0x0070), 0x40 },  /* Gr digital gain */
+	{ CCI_REG16(0x0071), 0x40 },  /* R digital gain */
+	{ CCI_REG16(0x0072), 0x40 },  /* B digital gain */
+	{ CCI_REG16(0x0073), 0x40 },  /* Gb digital gain */
 	{ CCI_REG16(0x0040), 0x82 },
-	{ CCI_REG16(0x0030), 0x80 },
-	{ CCI_REG16(0x0031), 0x80 },
-	{ CCI_REG16(0x0032), 0x80 },
-	{ CCI_REG16(0x0033), 0x80 },
-	{ GC2607_REG_EXPOSURE_H, 0x04 },  /* Exposure high byte */
-	{ GC2607_REG_EXPOSURE_L, 0x38 },  /* Exposure low byte = 1080 */
-	{ GC2607_REG_AGAIN_H, 0x00 },
-	{ GC2607_REG_AGAIN_H, 0x00 },
+	{ CCI_REG16(0x0030), 0x80 },  /* global Gr gain */
+	{ CCI_REG16(0x0031), 0x80 },  /* global R gain */
+	{ CCI_REG16(0x0032), 0x80 },  /* global B gain */
+	{ CCI_REG16(0x0033), 0x80 },  /* global Gb gain */
+	{ GC2607_REG_EXPOSURE_H, 0x04 },  /* CISCTL_exp: default exposure 0x0438 = 1080 lines */
+	{ GC2607_REG_EXPOSURE_L, 0x38 },
+	{ GC2607_REG_AGAIN_H, 0x00 },     /* ANALOG_PGA_gain_T1: analog gain = 1.0x */
+	{ GC2607_REG_AGAIN_H, 0x00 },     /* second write from reference; purpose unclear, kept for safety */
 	{ GC2607_REG_AGAIN_L, 0x00 },
-	{ CCI_REG16(0x0208), 0x04 },
-	{ CCI_REG16(0x0209), 0x00 },
+	{ CCI_REG16(0x0208), 0x04 },  /* auto_pregain_T1 H (pre-gain for T1 exposure) */
+	{ CCI_REG16(0x0209), 0x00 },  /* auto_pregain_T1 L */
 	{ CCI_REG16(0x009e), 0x01 },
 	{ CCI_REG16(0x009f), 0xa0 },
-	{ CCI_REG16(0x0db8), 0x08 },
-	{ CCI_REG16(0x0db6), 0x02 },
-	{ CCI_REG16(0x0db4), 0x05 },
-	{ CCI_REG16(0x0db5), 0x16 },
-	{ CCI_REG16(0x0db9), 0x09 },
-	{ CCI_REG16(0x0d93), 0x05 },
-	{ CCI_REG16(0x0d94), 0x06 },
-	{ CCI_REG16(0x0d95), 0x0b },
-	{ CCI_REG16(0x0d99), 0x10 },
+
+	/* MIPI Tx timing (clock lane: §8.1, data lane: §8.2) */
+	{ CCI_REG16(0x0db8), 0x08 },  /* T_CLK_POST */
+	{ CCI_REG16(0x0db6), 0x02 },  /* T_CLK_PRE */
+	{ CCI_REG16(0x0db4), 0x05 },  /* T_CLK_HS_PREPARE */
+	{ CCI_REG16(0x0db5), 0x16 },  /* T_CLK_ZERO */
+	{ CCI_REG16(0x0db9), 0x09 },  /* T_CLK_TRAIL */
+	{ CCI_REG16(0x0d93), 0x05 },  /* T_LPX */
+	{ CCI_REG16(0x0d94), 0x06 },  /* T_HS_PREPARE */
+	{ CCI_REG16(0x0d95), 0x0b },  /* T_HS_ZERO */
+	{ CCI_REG16(0x0d99), 0x10 },  /* T_HS_TRAIL */
+
+	/* MIPI control: two-phase enable — 0x01 arms the Tx, then PLL registers
+	 * are configured, then 0x91 enables clock and data lanes.
+	 */
 	{ CCI_REG16(0x0082), 0x03 },
-	{ CCI_REG16(0x0107), 0x05 },
-	{ CCI_REG16(0x0117), 0x01 },
+	{ CCI_REG16(0x0107), 0x05 },  /* CSI2_mode2: mode_update=1, mipi_wclk_gate_en=1 */
+	{ CCI_REG16(0x0117), 0x01 },  /* MIPI Tx enable phase 1 */
 	{ CCI_REG16(0x0d80), 0x07 },
 	{ CCI_REG16(0x0d81), 0x02 },
 	{ CCI_REG16(0x0d84), 0x09 },
@@ -315,12 +344,14 @@ static const struct cci_reg_sequence gc2607_1080p_30fps_regs[] = {
 	{ CCI_REG16(0x0d87), 0xb1 },
 	{ CCI_REG16(0x0222), 0x00 },
 	{ CCI_REG16(0x0223), 0x01 },
-	{ CCI_REG16(0x0117), 0x91 },
+	{ CCI_REG16(0x0117), 0x91 },  /* MIPI Tx enable phase 2 (clk + data lanes) */
+
+	/* Analog calibration */
 	{ CCI_REG16(0x03f4), 0x38 },
 	{ CCI_REG16(0x0e69), 0x00 },
 	{ CCI_REG16(0x00d6), 0x00 },
 	{ CCI_REG16(0x00d0), 0x0d },
-	{ CCI_REG16(0x00e0), 0x18 },
+	{ CCI_REG16(0x00e0), 0x18 },  /* per-channel calibration [0..7] */
 	{ CCI_REG16(0x00e1), 0x18 },
 	{ CCI_REG16(0x00e2), 0x18 },
 	{ CCI_REG16(0x00e3), 0x18 },
