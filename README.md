@@ -74,6 +74,8 @@ ships, and `[D]` a module installed via DKMS. Solid arrows are the frame data pa
   +-----------------------------------------------------------------+
 ```
 
+Want to learn more about what the above means? See [here](docs/architecture.md).
+
 Example image taken with the webcam in suboptimal lightning (evening) 
 ![Example](./assets/gc2607-frame-29.jpg)
 
