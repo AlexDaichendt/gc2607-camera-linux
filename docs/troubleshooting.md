@@ -160,6 +160,40 @@ HAL without that patch, pass the flag manually instead:
 cmake -S . -B build-gc2607 -DCMAKE_CXX_FLAGS="-Wno-error" ...
 ```
 
+## HAL Build Succeeds But Produces No Libraries
+
+If `cmake --build build-gc2607` exits 0 but no `ipu6epmtl.so` / `libcamhal.so` are
+produced, the IPU version was not selected. The HAL's library targets are created
+inside a `foreach(IPU_VER ...)` loop in `CMakeLists.txt`, so with no `IPU_VER` the
+build has nothing to do. Reconfigure with the target set:
+
+```sh
+cmake -S . -B build-gc2607 -DCMAKE_BUILD_TYPE=Release \
+  -DIPU_VER=ipu6epmtl -DUSE_PG_LITE_PIPE=ON \
+  -DBUILD_CAMHAL_PLUGIN=ON -DBUILD_CAMHAL_ADAPTOR=ON \
+  -DCMAKE_INSTALL_PREFIX="$HOME/opt/gc2607-ipu6"
+```
+
+On CMake 4.x also add `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` so the old
+`cmake_minimum_required` is accepted.
+
+## HAL Link Fails With `cannot find -lia_*-ipu6epmtl`
+
+The HAL links against the Intel imaging libraries by unversioned name (e.g.
+`-lia_aiqb_parser-ipu6epmtl`). Some `ipu6-camera-bins` packages install only the
+runtime `libia_*-ipu6epmtl.so.0` files and omit the unversioned `.so` development
+symlinks, so the link step fails even though the libraries are present. Create the
+missing symlinks (re-run after any `ipu6-camera-bins` package update, which can
+remove them again):
+
+```sh
+sudo sh -c 'cd /usr/lib && for f in lib*-ipu6epmtl.so.0; do
+    [ -e "${f%.0}" ] || ln -s "$f" "${f%.0}"
+done && ldconfig'
+```
+
+Adjust the libdir if your distro installs the bins somewhere other than `/usr/lib`.
+
 ## GC2607 DKMS Build Complains About A Missing dkms.conf
 
 The `dkms.conf` ships at the root of the `gc2607-kernel/` driver tree, alongside `gc2607.c` and the

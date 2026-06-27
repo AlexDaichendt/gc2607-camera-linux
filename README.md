@@ -253,13 +253,25 @@ cd "$HAL"
 
 cmake -S . -B build-gc2607 \
   -DCMAKE_BUILD_TYPE=Release \
+  -DIPU_VER=ipu6epmtl \
+  -DUSE_PG_LITE_PIPE=ON \
+  -DBUILD_CAMHAL_PLUGIN=ON \
+  -DBUILD_CAMHAL_ADAPTOR=ON \
   -DCMAKE_INSTALL_PREFIX="$HOME/opt/gc2607-ipu6"
 
 cmake --build build-gc2607 -j"$(nproc)"
 cmake --install build-gc2607
 ```
 
-Use whatever additional CMake options Intel's current HAL documentation requires for your distro.
+`-DIPU_VER=ipu6epmtl` selects the Meteor Lake target; the HAL's library targets are
+created inside a `foreach(IPU_VER ...)` loop, so without it `cmake --build` exits 0
+having built nothing. `BUILD_CAMHAL_PLUGIN`/`BUILD_CAMHAL_ADAPTOR` produce the
+`lib/libcamhal/plugins/` directory and the `libcamhal.so` adaptor that the runtime
+environment below expects.
+
+On CMake 4.x the HAL's old `cmake_minimum_required` is rejected; add
+`-DCMAKE_POLICY_VERSION_MINIMUM=3.5` to configure. Use whatever additional CMake
+options Intel's current HAL documentation requires for your distro.
 
 ## Validate With GStreamer
 
