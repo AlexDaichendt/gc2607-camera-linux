@@ -74,9 +74,7 @@ ships, and `[D]` a module installed via DKMS. Solid arrows are the frame data pa
   +-----------------------------------------------------------------+
 ```
 
-Curious how it all fits together? See [docs/architecture.md](docs/architecture.md)
-for the full bird's-eye graph — patches, DKMS, HAL assets, kernel state, and the
-runtime data path from sensor to GStreamer.
+Want to learn more about what the above means? See [here](docs/architecture.md).
 
 Example image taken with the webcam in suboptimal lightning (evening) 
 ![Example](./assets/gc2607-frame-29.jpg)
