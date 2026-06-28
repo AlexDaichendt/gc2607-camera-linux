@@ -895,10 +895,12 @@ out:
 static int gc2607_init_controls(struct gc2607 *gc2607)
 {
 	struct v4l2_ctrl_handler *hdl = &gc2607->ctrls;
+	struct v4l2_fwnode_device_properties props;
 	struct v4l2_ctrl *ctrl;
 	int ret;
 
-	ret = v4l2_ctrl_handler_init(hdl, 8);	/* link_freq, pixel_rate, hblank, vblank, exposure, analogue_gain, hflip, vflip */
+	/* 8 explicit controls + orientation/rotation from fwnode properties */
+	ret = v4l2_ctrl_handler_init(hdl, 10);
 	if (ret)
 		return ret;
 
@@ -951,6 +953,22 @@ static int gc2607_init_controls(struct gc2607 *gc2607)
 					  V4L2_CID_HFLIP, 0, 1, 1, 0);
 	gc2607->vflip = v4l2_ctrl_new_std(hdl, &gc2607_ctrl_ops,
 					  V4L2_CID_VFLIP, 0, 1, 1, 0);
+
+	/* Orientation/rotation reported by firmware (INT3472/ipu-bridge SSDB).
+	 * These are read-only and inform userspace how the sensor is mounted;
+	 * the platform here is upside-down (rotation 180).
+	 */
+	ret = v4l2_fwnode_device_parse(&gc2607->client->dev, &props);
+	if (ret) {
+		v4l2_ctrl_handler_free(hdl);
+		return ret;
+	}
+
+	ret = v4l2_ctrl_new_fwnode_properties(hdl, &gc2607_ctrl_ops, &props);
+	if (ret) {
+		v4l2_ctrl_handler_free(hdl);
+		return ret;
+	}
 
 	if (hdl->error) {
 		ret = hdl->error;

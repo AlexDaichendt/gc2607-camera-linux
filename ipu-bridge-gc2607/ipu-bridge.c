@@ -136,6 +136,13 @@ static const struct dmi_system_id upside_down_sensor_dmi_ids[] = {
 		},
 		.driver_data = "OVTI02C1",
 	},
+	{
+		.matches = {
+			DMI_EXACT_MATCH(DMI_SYS_VENDOR, "HUAWEI"),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "VGHH-XX"),
+		},
+		.driver_data = "GCTI2607",
+	},
 	{} /* Terminating entry */
 };
 
