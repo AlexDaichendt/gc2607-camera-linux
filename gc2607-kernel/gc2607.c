@@ -116,6 +116,18 @@
  * (0x02b3/0x02b4 analog stage + 0x020c/0x020d digital fine-trim); 'code' is the
  * realized analog gain in 1/64 units (= real_gain * 64), matching the units the
  * IPU6 AIQ writes to V4L2_CID_ANALOGUE_GAIN.
+ *
+ * Why not expose native register units? There is no single register field that
+ * linearly encodes the analog gain. Per the datasheet, ANALOG_PGA_gain_T1
+ * (0x02b3/0x02b4) is an opaque 16-bit bit-packed code selecting a discrete PGA
+ * configuration (not a multiplier), while col_gain_T1 (0x020c/0x020d, default
+ * 0x040) is a separate linear digital fine-trim in 1/64 steps. The realized
+ * gain is the product of these two stages, so the only monotonic, V4L2-usable
+ * representation is the resulting real gain. We express it in 1/64 units rather
+ * than, say, milli-units because that is exactly the SMIA code the AIQ emits
+ * (CMC coeffs M0=1 C0=0 M1=0 C1=64 -> real_gain = code / 64), avoiding a
+ * conversion round-trip. The register quads below are GalaxyCore's reference
+ * again table; their bit layout is undocumented in the preliminary datasheet.
  */
 struct gc2607_gain_lut {
 	u8 reg2b3;
@@ -1167,5 +1179,5 @@ module_i2c_driver(gc2607_i2c_driver);
 
 MODULE_SOFTDEP("pre: v4l2-fwnode v4l2-cci");
 MODULE_DESCRIPTION("GalaxyCore GC2607 sensor driver");
-MODULE_AUTHOR("Alex Daichendt <alex@daichendt.one>");
+MODULE_AUTHOR("Alexander Daichendt <kernel@daichendt.one>");
 MODULE_LICENSE("GPL");
