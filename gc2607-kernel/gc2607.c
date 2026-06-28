@@ -54,7 +54,7 @@
 
 /* External clock the shipped init/timing assumes. The sensor itself accepts
  * 6..27 MHz (datasheet typ 24 MHz), but the PLL block in the init array only
- * yields 30 fps at this rate; any other rate moves the pixel clock.
+ * yields ~29.9 fps at this rate; any other rate moves the pixel clock.
  */
 #define GC2607_XCLK_FREQ		19200000
 
@@ -81,23 +81,36 @@
 
 /* Sensor timing. The init register set keeps the reference (24 MHz) PLL but
  * runs near-minimum blanking so that at this board's 19.2 MHz MCLK the
- * resulting ~65.6 MHz readout clock still yields 30 fps. See README / FINDINGS.
+ * resulting ~65.4 MHz readout clock still yields ~29.9 fps. See README / FINDINGS.
  */
 #define GC2607_HTS			1959	/* line length 0x0342/0x0343 */
-#define GC2607_VTS			1116	/* min frame length (1080+20+16) -> 30.0 fps */
+#define GC2607_VTS			1116	/* min frame length (1080+20+16) -> ~29.9 fps */
 #define GC2607_WIDTH			1920
 #define GC2607_HEIGHT			1080
 #define GC2607_HBLANK			(GC2607_HTS - GC2607_WIDTH)   /* 39, llp=width+hblank */
-#define GC2607_VBLANK			(GC2607_VTS - GC2607_HEIGHT)  /* 36, fll=height+vblank (30fps) */
+#define GC2607_VBLANK			(GC2607_VTS - GC2607_HEIGHT)  /* 36, fll=height+vblank (~29.9fps) */
 #define GC2607_VBLANK_MAX		2270	/* VTS up to ~3350 -> ~10fps for low-light AE */
 #define GC2607_EXPOSURE_MARGIN		8	/* exposure must stay below frame length */
 
-/* Sensor readout pixel rate = HTS x VTS x fps. The HAL 3A uses it together with
- * hblank/vblank for frame-duration and exposure<->time conversion, so it must
- * be the readout rate, NOT the MIPI bus rate.
+/*
+ * PIXEL_RATE is the sensor readout clock (HTS × VTS × fps ≈ 65.4 MHz), not the
+ * MIPI bus throughput.  The kernel tx-rx formula (link_freq × 2 × lanes / bpp)
+ * gives 134.4 MHz, but libcamera and the IPU6 AIQ need the readout clock to
+ * convert exposure lines to microseconds and compute frame duration from
+ * hblank/vblank.  See Documentation/driver-api/media/sensor_driver_requirements.rst
+ * and https://libcamera.org/sensor-driver-requirements.html
+ *
+ * The pixel clock and MIPI clock share the same PLL, designed for 24 MHz MCLK.
+ * At the board's 19.2 MHz MCLK (0.8×) both clocks scale proportionally, giving
+ * a measured frame rate of ~29.90 fps rather than exactly 30.  PIXEL_RATE uses
+ * the measured fps so that exposure-to-time conversions remain accurate.
+ *
+ * LINK_FREQ = 336 MHz (672 Mbps/lane) is the rate expected by the ipu-bridge
+ * firmware; deviating from it causes CSI-2 CRC errors.  The GC2607 datasheet
+ * (V0.1, preliminary) does not specify the MIPI bit rate.
  */
-#define GC2607_PIXEL_RATE		((s64)GC2607_HTS * GC2607_VTS * 30)  /* ~65.6 MHz */
-#define GC2607_LINK_FREQ		336000000LL  /* 672 Mbps / 2 lanes */
+#define GC2607_PIXEL_RATE		((s64)GC2607_HTS * GC2607_VTS * 2990 / 100)  /* ~65.4 MHz */
+#define GC2607_LINK_FREQ		336000000LL  /* 336 MHz = 672 Mbps / 2 (DDR) */
 
 /* Gain lookup table entry. The again pipeline uses four registers together
  * (0x02b3/0x02b4 analog stage + 0x020c/0x020d digital fine-trim); 'code' is the
