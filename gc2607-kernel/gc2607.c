@@ -560,41 +560,6 @@ static int gc2607_enum_frame_size(struct v4l2_subdev *sd,
 	return 0;
 }
 
-static int gc2607_enum_frame_interval(struct v4l2_subdev *sd,
-				      struct v4l2_subdev_state *sd_state,
-				      struct v4l2_subdev_frame_interval_enum *fie)
-{
-	if (fie->index >= ARRAY_SIZE(gc2607_modes))
-		return -EINVAL;
-
-	if (fie->code != MEDIA_BUS_FMT_SGRBG10_1X10)
-		return -EINVAL;
-
-	if (fie->width != gc2607_modes[fie->index].width ||
-	    fie->height != gc2607_modes[fie->index].height)
-		return -EINVAL;
-
-	fie->interval.numerator = 1;
-	fie->interval.denominator = gc2607_modes[fie->index].max_fps;
-
-	return 0;
-}
-
-static int gc2607_get_frame_interval(struct v4l2_subdev *sd,
-				     struct v4l2_subdev_state *sd_state,
-				     struct v4l2_subdev_frame_interval *fi)
-{
-	struct gc2607 *gc2607 = to_gc2607(sd);
-
-	if (fi->which != V4L2_SUBDEV_FORMAT_ACTIVE)
-		return -EINVAL;
-
-	fi->interval.numerator = 1;
-	fi->interval.denominator = gc2607->cur_mode->max_fps;
-
-	return 0;
-}
-
 static int gc2607_get_fmt(struct v4l2_subdev *sd,
 			  struct v4l2_subdev_state *sd_state,
 			  struct v4l2_subdev_format *format)
@@ -645,9 +610,6 @@ static int gc2607_set_fmt(struct v4l2_subdev *sd,
 static const struct v4l2_subdev_pad_ops gc2607_pad_ops = {
 	.enum_mbus_code = gc2607_enum_mbus_code,
 	.enum_frame_size = gc2607_enum_frame_size,
-	.enum_frame_interval = gc2607_enum_frame_interval,
-	.get_frame_interval = gc2607_get_frame_interval,
-	.set_frame_interval = gc2607_get_frame_interval,
 	.get_fmt = gc2607_get_fmt,
 	.set_fmt = gc2607_set_fmt,
 };
