@@ -581,9 +581,13 @@ static int gc2607_get_fmt(struct v4l2_subdev *sd,
 {
 	struct gc2607 *gc2607 = to_gc2607(sd);
 
-	format->format = *v4l2_subdev_state_get_format(sd_state, format->pad);
-	format->format.code = gc2607_mbus_code(gc2607->hflip->val,
-					       gc2607->vflip->val);
+	if (format->which == V4L2_SUBDEV_FORMAT_ACTIVE) {
+		gc2607_fill_fmt(gc2607->cur_mode, &format->format,
+				gc2607->hflip->val, gc2607->vflip->val);
+	} else {
+		format->format = *v4l2_subdev_state_get_format(sd_state,
+							       format->pad);
+	}
 	return 0;
 }
 
@@ -592,10 +596,22 @@ static int gc2607_set_fmt(struct v4l2_subdev *sd,
 			  struct v4l2_subdev_format *format)
 {
 	struct gc2607 *gc2607 = to_gc2607(sd);
-	struct v4l2_mbus_framefmt *fmt =
-		v4l2_subdev_state_get_format(sd_state, format->pad);
+	struct v4l2_mbus_framefmt *fmt;
 
-	/* Single fixed mode: ignore the request and report what we support. */
+	/* Only 10-bit Bayer is supported (exact code depends on flip state). */
+	switch (format->format.code) {
+	case MEDIA_BUS_FMT_SGRBG10_1X10:
+	case MEDIA_BUS_FMT_SRGGB10_1X10:
+	case MEDIA_BUS_FMT_SBGGR10_1X10:
+	case MEDIA_BUS_FMT_SGBRG10_1X10:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	fmt = v4l2_subdev_state_get_format(sd_state, format->pad);
+
+	/* Single fixed mode: fill with the flip-derived code and fixed size. */
 	gc2607_fill_fmt(&gc2607_modes[0], fmt,
 			gc2607->hflip->val, gc2607->vflip->val);
 	format->format = *fmt;
@@ -1040,6 +1056,7 @@ static int gc2607_probe(struct i2c_client *client)
 	v4l2_i2c_subdev_init(&gc2607->sd, client, &gc2607_subdev_ops);
 	gc2607->sd.internal_ops = &gc2607_internal_ops;
 	gc2607->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE | V4L2_SUBDEV_FL_HAS_EVENTS;
+	gc2607->sd.state_lock = &gc2607->mutex;
 
 	ret = gc2607_init_controls(gc2607);
 	if (ret) {
@@ -1081,7 +1098,7 @@ static int gc2607_probe(struct i2c_client *client)
 
 	pm_runtime_put(dev);
 
-	ret = v4l2_async_register_subdev(&gc2607->sd);
+	ret = v4l2_async_register_subdev_sensor(&gc2607->sd);
 	if (ret) {
 		dev_err(dev, "Failed to register async subdev: %d\n", ret);
 		goto err_power;
