@@ -194,7 +194,6 @@ struct gc2607 {
 
 	/* Device state */
 	bool streaming;
-	bool powered;
 };
 
 static inline struct gc2607 *to_gc2607(struct v4l2_subdev *sd)
@@ -407,6 +406,7 @@ static void gc2607_fill_fmt(const struct gc2607_mode *mode,
 static int gc2607_power_on(struct gc2607 *gc2607)
 {
 	struct i2c_client *client = gc2607->client;
+	bool clk_enabled = false;
 	int ret;
 
 	/* Enable regulators if available */
@@ -427,15 +427,19 @@ static int gc2607_power_on(struct gc2607 *gc2607)
 			dev_err(&client->dev, "Failed to enable clock: %d\n", ret);
 			goto err_reg;
 		}
+		clk_enabled = true;
 		usleep_range(5000, 6000);
 	}
 
 	/*
-	 * Reset sequence from the reference driver, validated on hardware:
-	 * physical HIGH (20ms) -> LOW (20ms) -> HIGH (10ms).
+	 * Reset sequence from the Windows reference driver, validated on
+	 * hardware: assert RESETB (LOW) for 20 ms, then de-assert (HIGH) with
+	 * a 10 ms settle.  The preliminary datasheet (§9.2, V0.1) lists all
+	 * power-on timing parameters as TBD, so these conservative values are
+	 * the best available reference.
 	 *
-	 * The GPIO is described active-low, so gpiod_set_value(0) de-asserts
-	 * (physical HIGH = running) and gpiod_set_value(1) asserts (LOW = reset).
+	 * The GPIO is described active-low: gpiod_set_value(1) asserts
+	 * (physical LOW = reset), gpiod_set_value(0) de-asserts (HIGH = run).
 	 */
 	if (gc2607->reset_gpio) {
 		gpiod_set_value_cansleep(gc2607->reset_gpio, 0);
@@ -457,12 +461,13 @@ static int gc2607_power_on(struct gc2607 *gc2607)
 	/* Wait for sensor to fully boot */
 	msleep(20);
 
-	gc2607->powered = true;
 	dev_dbg(&client->dev, "Sensor powered on\n");
 
 	return 0;
 
 err_reg:
+	if (clk_enabled)
+		clk_disable_unprepare(gc2607->xclk);
 	if (gc2607->supplies[0].supply)
 		regulator_bulk_disable(ARRAY_SIZE(gc2607->supplies), gc2607->supplies);
 	return ret;
@@ -471,9 +476,6 @@ err_reg:
 static void gc2607_power_off(struct gc2607 *gc2607)
 {
 	struct i2c_client *client = gc2607->client;
-
-	if (!gc2607->powered)
-		return;
 
 	if (gc2607->reset_gpio)
 		gpiod_set_value_cansleep(gc2607->reset_gpio, 0);
@@ -487,7 +489,6 @@ static void gc2607_power_off(struct gc2607 *gc2607)
 	if (gc2607->supplies[0].supply)
 		regulator_bulk_disable(ARRAY_SIZE(gc2607->supplies), gc2607->supplies);
 
-	gc2607->powered = false;
 	dev_dbg(&client->dev, "Sensor powered off\n");
 }
 
@@ -858,9 +859,8 @@ static int gc2607_runtime_resume(struct device *dev)
 	return gc2607_power_on(gc2607);
 }
 
-static const struct dev_pm_ops gc2607_pm_ops = {
-	SET_RUNTIME_PM_OPS(gc2607_runtime_suspend, gc2607_runtime_resume, NULL)
-};
+static DEFINE_RUNTIME_DEV_PM_OPS(gc2607_pm_ops, gc2607_runtime_suspend,
+				  gc2607_runtime_resume, NULL);
 
 /*
  * Validate the firmware-described hardware configuration: external clock rate,
@@ -1079,10 +1079,8 @@ static int gc2607_probe(struct i2c_client *client)
 		goto err_media;
 	}
 
-	/* Enable runtime PM and power on to detect the chip ID */
-	pm_runtime_set_active(dev);
+	/* Power on to detect chip ID, then release; sensor idles until streamed */
 	pm_runtime_enable(dev);
-	pm_runtime_idle(dev);
 
 	ret = pm_runtime_resume_and_get(dev);
 	if (ret) {
@@ -1096,13 +1094,13 @@ static int gc2607_probe(struct i2c_client *client)
 		goto err_power;
 	}
 
-	pm_runtime_put(dev);
-
 	ret = v4l2_async_register_subdev_sensor(&gc2607->sd);
 	if (ret) {
 		dev_err(dev, "Failed to register async subdev: %d\n", ret);
 		goto err_power;
 	}
+
+	pm_runtime_put(dev);
 
 	dev_info(dev, "GC2607 probed (SGRBG10 %ux%u@%ufps)\n",
 		 gc2607->cur_mode->width, gc2607->cur_mode->height,
@@ -1111,7 +1109,7 @@ static int gc2607_probe(struct i2c_client *client)
 	return 0;
 
 err_power:
-	pm_runtime_put_noidle(dev);
+	pm_runtime_put_sync(dev);
 err_pm:
 	pm_runtime_disable(dev);
 	pm_runtime_set_suspended(dev);
@@ -1159,7 +1157,7 @@ MODULE_DEVICE_TABLE(i2c, gc2607_id);
 static struct i2c_driver gc2607_i2c_driver = {
 	.driver = {
 		.name = "gc2607",
-		.pm = &gc2607_pm_ops,
+		.pm = pm_sleep_ptr(&gc2607_pm_ops),
 		.acpi_match_table = gc2607_acpi_ids,
 	},
 	.probe = gc2607_probe,
