@@ -16,10 +16,27 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRIVER="$ROOT/gc2607-kernel"
-VIDEO="${VIDEO:-/dev/video0}"
-MEDIA="${MEDIA:-/dev/media0}"
+# VIDEO/MEDIA are auto-detected after the IPU6 stack loads (node numbers move
+# across reloads and /dev/video0 is often the UVC webcam, not ISYS). Set the
+# env vars to override.
+VIDEO="${VIDEO:-}"
+MEDIA="${MEDIA:-}"
 FRAMES="${FRAMES:-150}"
-CSI_LINK='"Intel IPU6 CSI2 0":1 -> "Intel IPU6 ISYS Capture 0":0'
+CAPTURE_ENTITY="Intel IPU6 ISYS Capture 0"
+CSI_LINK="\"Intel IPU6 CSI2 0\":1 -> \"${CAPTURE_ENTITY}\":0"
+
+# Echo the /dev/mediaN whose driver is intel-ipu6 (the gc2607 graph), or nothing.
+detect_media() {
+    local m
+    for m in /dev/media*; do
+        [[ -e "$m" ]] || continue
+        if media-ctl -d "$m" -p 2>/dev/null | grep -qE '^driver[[:space:]]+intel-ipu6$'; then
+            echo "$m"
+            return 0
+        fi
+    done
+    return 1
+}
 
 MODE=dev   # dev | dkms
 BUILD=1
@@ -56,7 +73,8 @@ fi
 
 echo "== Tearing down IPU6 stack and unloading gc2607 =="
 pkill -f "gst-launch.*video" 2>/dev/null || true
-media-ctl -d "$MEDIA" -l "${CSI_LINK}[0]" 2>/dev/null || true
+TEARDOWN_MEDIA="${MEDIA:-$(detect_media || true)}"
+[[ -n "$TEARDOWN_MEDIA" ]] && media-ctl -d "$TEARDOWN_MEDIA" -l "${CSI_LINK}[0]" 2>/dev/null || true
 modprobe -r intel-ipu6-isys 2>/dev/null || true
 modprobe -r intel-ipu6 2>/dev/null || true
 rmmod gc2607 2>/dev/null || modprobe -r gc2607 2>/dev/null || true
@@ -76,10 +94,27 @@ modprobe intel-ipu6
 modprobe intel-ipu6-isys
 sleep 1
 
+echo "== Detecting IPU6 media + ISYS capture nodes =="
+[[ -z "$MEDIA" ]] && MEDIA="$(detect_media || true)"
+if [[ -z "$MEDIA" ]]; then
+    echo "Could not find an intel-ipu6 media device (is intel-ipu6-isys loaded?)." >&2
+    exit 1
+fi
+if [[ -z "$VIDEO" ]]; then
+    VIDEO="$(media-ctl -d "$MEDIA" -e "$CAPTURE_ENTITY" 2>/dev/null)"
+fi
+if [[ -z "$VIDEO" || ! -e "$VIDEO" ]]; then
+    echo "Could not resolve '$CAPTURE_ENTITY' to a /dev/video node on $MEDIA." >&2
+    exit 1
+fi
+echo "   MEDIA=$MEDIA  VIDEO=$VIDEO"
+
 echo "== Bringing up the raw ISYS pipeline =="
 media-ctl -d "$MEDIA" -V '"Intel IPU6 CSI2 0":0 [fmt:SGRBG10_1X10/1920x1080]' 2>/dev/null || true
 media-ctl -d "$MEDIA" -V '"Intel IPU6 CSI2 0":1 [fmt:SGRBG10_1X10/1920x1080]' 2>/dev/null || true
-v4l2-ctl -d "$VIDEO" --set-fmt-video=width=1920,height=1080,pixelformat=BA10 >/dev/null 2>&1 || true
+if ! v4l2-ctl -d "$VIDEO" --set-fmt-video=width=1920,height=1080,pixelformat=BA10; then
+    echo "Warning: failed to set BA10/1920x1080 on $VIDEO; fps probe may fail." >&2
+fi
 media-ctl -d "$MEDIA" -l "${CSI_LINK}[1]" 2>/dev/null || true
 
 echo "== Loaded module =="

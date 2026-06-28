@@ -424,6 +424,9 @@ static void gc2607_fill_fmt(const struct gc2607_mode *mode,
 	fmt->code = gc2607_mbus_code(hflip, vflip);
 	fmt->field = V4L2_FIELD_NONE;
 	fmt->colorspace = V4L2_COLORSPACE_RAW;
+	fmt->ycbcr_enc = V4L2_YCBCR_ENC_601;
+	fmt->quantization = V4L2_QUANTIZATION_FULL_RANGE;
+	fmt->xfer_func = V4L2_XFER_FUNC_NONE;
 }
 
 /*
@@ -583,16 +586,6 @@ static int gc2607_set_fmt(struct v4l2_subdev *sd,
 	struct gc2607 *gc2607 = to_gc2607(sd);
 	struct v4l2_mbus_framefmt *fmt;
 
-	/* Only 10-bit Bayer is supported (exact code depends on flip state). */
-	switch (format->format.code) {
-	case MEDIA_BUS_FMT_SGRBG10_1X10:
-	case MEDIA_BUS_FMT_SRGGB10_1X10:
-	case MEDIA_BUS_FMT_SBGGR10_1X10:
-	case MEDIA_BUS_FMT_SGBRG10_1X10:
-		break;
-	default:
-		return -EINVAL;
-	}
 
 	fmt = v4l2_subdev_state_get_format(sd_state, format->pad);
 
