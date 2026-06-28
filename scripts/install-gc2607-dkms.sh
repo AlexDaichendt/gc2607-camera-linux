@@ -30,17 +30,15 @@ if [[ -z "$PACKAGE_VERSION" ]]; then
     exit 1
 fi
 
-# Point /usr/src at the in-repo driver tree instead of copying files in. dkms
-# re-reads the source on every build, so edits in the repo flow straight through
-# to the next rebuild with nothing to keep in sync.
+# Point /usr/src at the in-repo driver tree instead of copying files in.
 ln -sfn "$DRIVER" "/usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION}"
 
-# dkms add reads dkms.conf and stages the whole tree; install builds + installs
-# (the toolchain flag is handled inside dkms.conf). --force re-runs after edits.
-if ! dkms status -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION" 2>/dev/null | grep -q .; then
-    dkms add -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"
-fi
-dkms install --force -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"
+# dkms add copies source into /var/lib/dkms at registration time — it does NOT
+# re-read from /usr/src on subsequent installs. Always remove+add so the build
+# directory reflects the current source tree before installing.
+dkms remove -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION" --all 2>/dev/null || true
+dkms add -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"
+dkms install -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"
 depmod -a
 
 if lsmod | grep -q "^${PACKAGE_NAME}[[:space:]]"; then
