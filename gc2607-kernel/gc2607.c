@@ -22,6 +22,7 @@
 #include <media/v4l2-event.h>
 #include <media/v4l2-fwnode.h>
 #include <media/v4l2-async.h>
+#include <media/v4l2-common.h>
 
 #define GC2607_CHIP_ID			0x2607
 #define GC2607_REG_CHIP_ID_H		CCI_REG8(0x03f0)
@@ -406,7 +407,6 @@ static void gc2607_fill_fmt(const struct gc2607_mode *mode,
 static int gc2607_power_on(struct gc2607 *gc2607)
 {
 	struct i2c_client *client = gc2607->client;
-	bool clk_enabled = false;
 	int ret;
 
 	/* Enable regulators if available */
@@ -420,16 +420,12 @@ static int gc2607_power_on(struct gc2607 *gc2607)
 		usleep_range(5000, 6000);
 	}
 
-	/* Enable master clock if available */
-	if (gc2607->xclk) {
-		ret = clk_prepare_enable(gc2607->xclk);
-		if (ret) {
-			dev_err(&client->dev, "Failed to enable clock: %d\n", ret);
-			goto err_reg;
-		}
-		clk_enabled = true;
-		usleep_range(5000, 6000);
+	ret = clk_prepare_enable(gc2607->xclk);
+	if (ret) {
+		dev_err(&client->dev, "Failed to enable clock: %d\n", ret);
+		goto err_reg;
 	}
+	usleep_range(5000, 6000);
 
 	/*
 	 * Reset sequence from the Windows reference driver, validated on
@@ -466,8 +462,7 @@ static int gc2607_power_on(struct gc2607 *gc2607)
 	return 0;
 
 err_reg:
-	if (clk_enabled)
-		clk_disable_unprepare(gc2607->xclk);
+	clk_disable_unprepare(gc2607->xclk);
 	if (gc2607->supplies[0].supply)
 		regulator_bulk_disable(ARRAY_SIZE(gc2607->supplies), gc2607->supplies);
 	return ret;
@@ -483,8 +478,7 @@ static void gc2607_power_off(struct gc2607 *gc2607)
 	if (gc2607->powerdown_gpio)
 		gpiod_set_value_cansleep(gc2607->powerdown_gpio, 1);
 
-	if (gc2607->xclk)
-		clk_disable_unprepare(gc2607->xclk);
+	clk_disable_unprepare(gc2607->xclk);
 
 	if (gc2607->supplies[0].supply)
 		regulator_bulk_disable(ARRAY_SIZE(gc2607->supplies), gc2607->supplies);
@@ -879,15 +873,7 @@ static int gc2607_check_hwcfg(struct device *dev, struct gc2607 *gc2607)
 	if (!fwnode)
 		return -ENXIO;
 
-	/* External clock: from the INT3472 platform clock (ACPI) or the
-	 * "clock-frequency" property (DT).
-	 */
-	if (gc2607->xclk)
-		xclk_freq = clk_get_rate(gc2607->xclk);
-	else if (fwnode_property_read_u32(fwnode, "clock-frequency", &xclk_freq))
-		return dev_err_probe(dev, -EINVAL,
-				     "no external clock or clock-frequency\n");
-
+	xclk_freq = clk_get_rate(gc2607->xclk);
 	if (xclk_freq != GC2607_XCLK_FREQ)
 		return dev_err_probe(dev, -EINVAL,
 				     "external clock %u Hz, expected %u Hz\n",
@@ -1041,8 +1027,7 @@ static int gc2607_probe(struct i2c_client *client)
 		goto err_mutex;
 	}
 
-	/* Master clock (optional - INT3472 may provide it internally) */
-	gc2607->xclk = devm_clk_get_optional(dev, NULL);
+	gc2607->xclk = devm_v4l2_sensor_clk_get(dev, NULL);
 	if (IS_ERR(gc2607->xclk)) {
 		ret = PTR_ERR(gc2607->xclk);
 		goto err_mutex;
