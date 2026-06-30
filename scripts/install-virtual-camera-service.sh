@@ -5,9 +5,9 @@ set -euo pipefail
 #
 #   1. v4l2loopback auto-loads at boot with the right options, so
 #      /dev/video60 ("GC2607 Virtual Camera") exists before the user logs in.
-#   2. A systemd --user service runs the on-demand watcher
-#      (virtual-camera.sh watch-foreground): the real GC2607 sensor only spins
-#      up while an app is actually using the virtual device, then idles off.
+#   2. A systemd --user service runs the relayd engine
+#      (virtual-camera.sh run): relayd powers the real GC2607 sensor only while
+#      an app is actually using the virtual device, then idles off.
 #   3. The WirePlumber desktop integration is installed so apps prefer the
 #      virtual camera and the raw IPU6 nodes stay hidden.
 #
@@ -44,11 +44,11 @@ echo "    wrote $MODPROBE_CONF"
 echo "==> Installing WirePlumber desktop integration"
 "$ROOT/scripts/install-virtual-camera-desktop.sh"
 
-echo "==> Installing systemd --user watcher service"
+echo "==> Installing systemd --user relayd engine service"
 mkdir -p "$(dirname "$UNIT_FILE")"
 install -m 0644 /dev/stdin "$UNIT_FILE" <<EOF
 [Unit]
-Description=GC2607 on-demand virtual camera watcher
+Description=GC2607 on-demand virtual camera (v4l2-relayd engine)
 Documentation=https://github.com/AlexDaichendt/gc2607-camera-linux
 # The real sensor and PipeWire registration both need the graphical user
 # session's media stack to be up first.
@@ -57,7 +57,7 @@ Wants=pipewire.service wireplumber.service
 
 [Service]
 Type=simple
-ExecStart=${ROOT}/scripts/virtual-camera.sh watch-foreground
+ExecStart=${ROOT}/scripts/virtual-camera.sh run
 Restart=on-failure
 RestartSec=5
 
@@ -72,6 +72,6 @@ systemctl --user enable --now "${UNIT_NAME}.service"
 echo
 echo "Done. The GC2607 virtual camera is now persistent across reboots."
 echo "  - v4l2loopback auto-loads at boot (/dev/video${VIDEO_NR} = '${LABEL}')"
-echo "  - ${UNIT_NAME}.service arms the on-demand watcher on login"
+echo "  - ${UNIT_NAME}.service starts the relayd engine on login"
 echo
 echo "Check status with: scripts/virtual-camera.sh status"

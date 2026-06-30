@@ -341,11 +341,11 @@ Select `GC2607 Virtual Camera` in the application, then stop the real camera pip
 
 `install-virtual-camera-desktop.sh` hides the raw IPU6 and uncalibrated libcamera GC2607 sources
 from WirePlumber. `prepare` creates the cheap virtual V4L2 device and registers it with PipeWire
-without opening the real camera. `start` arms an on-demand watcher: it keeps a black standby stream
-attached so WebRTC camera pickers can see `/dev/video60`, then swaps in the real `icamerasrc`
-feeder only while an app actually opens `GC2607 Virtual Camera`. The script is deliberately not
-installed as an autostart service, so messaging apps can remain open without keeping the camera
-active.
+without opening the real camera. `start` launches [`v4l2-relayd`](https://gitlab.com/vicamo/v4l2-relayd),
+which owns `/dev/video60` as a producer (a black splash keeps it visible to WebRTC camera pickers)
+and powers the real `icamerasrc` pipeline only while an app actually has `GC2607 Virtual Camera`
+open, driven by v4l2loopback's `CLIENT_USAGE` event. The script is deliberately not installed as an
+autostart service, so messaging apps can remain open without keeping the camera active.
 
 See `docs/virtual-camera.md` for status, logs, output-mode overrides, and unloading the loopback
 device.
