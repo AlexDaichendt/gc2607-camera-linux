@@ -51,10 +51,6 @@ sudo dkms install "$DKMS_NAME/$DKMS_VERSION" -k "$KERNEL"
 sudo depmod -a "$KERNEL"
 
 sudo install -D -m 0644 \
-    "$ROOT/config/modules-load.d/intel-ipu6-psys.conf" \
-    /etc/modules-load.d/intel-ipu6-psys.conf
-
-sudo install -D -m 0644 \
     "$ROOT/config/udev/rules.d/70-ipu6-psys.rules" \
     /etc/udev/rules.d/70-ipu6-psys.rules
 

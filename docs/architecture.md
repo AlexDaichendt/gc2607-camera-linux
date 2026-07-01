@@ -53,11 +53,10 @@ There are four "worlds" in this repo, all tied together by `scripts/`:
 |                                                                              |
 |   gc2607.ko          intel-ipu6-psys.ko        ipu-bridge.ko                 |
 |   (DKMS)             (DKMS)                    (DKMS override)                |
-|   autoloaded via     modules-load.d            depmod priority               |
-|   ACPI modalias      forces load at boot       beats distro copy             |
+|   autoloaded via     autoloaded via            depmod priority               |
+|   ACPI modalias      aux-bus modalias          beats distro copy             |
 |   GCTI2607                                                                   |
 |                                                                              |
-|   /etc/modules-load.d/intel-ipu6-psys.conf                                   |
 |   /etc/udev/rules.d/70-ipu6-psys.rules  (chmod /dev/ipu-psys0 -> video)      |
 +------------------------------------------------------------------------------+
 ```

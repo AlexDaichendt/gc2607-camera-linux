@@ -40,7 +40,6 @@ DKMS_MODULES=(gc2607 ipu-bridge-gc2607 ipu6-drivers)
 # System files the manual scripts dropped.
 ETC_FILES=(
     /etc/modules-load.d/gc2607.conf
-    /etc/modules-load.d/intel-ipu6-psys.conf
     /etc/modules-load.d/gc2607-v4l2loopback.conf
     /etc/modprobe.d/gc2607-v4l2loopback.conf
     /etc/udev/rules.d/70-ipu6-psys.rules

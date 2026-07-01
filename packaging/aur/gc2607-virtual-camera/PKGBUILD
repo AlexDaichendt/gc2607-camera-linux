@@ -7,12 +7,9 @@
 # Ships:
 #   - /etc/v4l2-relayd.d/gc2607.conf      relayd instance (icamerasrc -> loopback)
 #   - v4l2loopback modprobe options + autoload (the "GC2607 Virtual Camera" node)
-#   - PSYS modules-load + /dev/ipu-psys0 udev permissions
 #   - system-wide WirePlumber rules (hide raw IPU6/libcamera, prefer the vcam)
-# and enables v4l2-relayd.service so the camera survives reboots.
-
 pkgname=gc2607-virtual-camera-git
-pkgver=r41.g1471d20
+pkgver=r43.g39ee14f
 pkgrel=1
 pkgdesc="GC2607 on-demand virtual webcam (v4l2-relayd) and system camera config"
 arch=('any')
@@ -65,12 +62,6 @@ package() {
 # Auto-load the v4l2loopback module at boot for the GC2607 virtual camera.
 v4l2loopback
 EOF
-
-  # IPU6 PSYS: force-load at boot + group/permissions on /dev/ipu-psys0.
-  install -Dm644 config/modules-load.d/intel-ipu6-psys.conf \
-    "${pkgdir}/usr/lib/modules-load.d/intel-ipu6-psys.conf"
-  install -Dm644 config/udev/rules.d/70-ipu6-psys.rules \
-    "${pkgdir}/usr/lib/udev/rules.d/70-ipu6-psys.rules"
 
   # Desktop integration, system-wide (per-user equivalent:
   # scripts/install-virtual-camera-desktop.sh).

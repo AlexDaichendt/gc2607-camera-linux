@@ -10,12 +10,9 @@ have_psys_module()
         modinfo -k "$KERNEL" intel_ipu6_psys >/dev/null 2>&1
 }
 
-sudo install -D -m 0644 \
-    "$ROOT/config/modules-load.d/intel-ipu6-psys.conf" \
-    /etc/modules-load.d/intel-ipu6-psys.conf
-
-# The gc2607 sensor module is autoloaded from its ACPI modalias (HID GCTI2607)
-# once installed and depmod'd, so it needs no modules-load.d force-load entry.
+# The gc2607 sensor module autoloads from its ACPI modalias (HID GCTI2607) and
+# intel-ipu6-psys from its auxiliary-bus modalias, so neither needs a
+# modules-load.d force-load entry.
 
 sudo install -D -m 0644 \
     "$ROOT/config/udev/rules.d/70-ipu6-psys.rules" \
