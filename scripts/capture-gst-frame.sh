@@ -6,14 +6,15 @@ OUT_PREFIX="${1:-/tmp/gc2607-frame}"
 FRAMES="${2:-30}"
 FLIP_METHOD="${GC2607_FLIP_METHOD:-rotate-180}"
 
-if [[ ! -d "$PREFIX" ]]; then
-    echo "Missing HAL prefix: $PREFIX" >&2
-    exit 1
+# Prefix-specific GStreamer wiring, only needed for an in-tree $HOME HAL build.
+# A packaged /usr install (gc2607-ipu6-camera-hal) needs none of this because
+# ld.so, pkg-config, and GStreamer all auto-discover /usr; skip it when the dev
+# prefix is absent and rely on the system install.
+if [[ -d "$PREFIX" ]]; then
+    export LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/lib/libcamhal/plugins:${LD_LIBRARY_PATH:-}"
+    export GST_PLUGIN_PATH="$PREFIX/lib/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
+    export GST_REGISTRY="${GST_REGISTRY:-$PREFIX/gstreamer-registry.bin}"
 fi
-
-export LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/lib/libcamhal/plugins:${LD_LIBRARY_PATH:-}"
-export GST_PLUGIN_PATH="$PREFIX/lib/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
-export GST_REGISTRY="${GST_REGISTRY:-$PREFIX/gstreamer-registry.bin}"
 
 rm -f "${OUT_PREFIX}"-*.jpg
 

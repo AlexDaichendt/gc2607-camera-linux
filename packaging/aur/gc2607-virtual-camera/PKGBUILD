@@ -9,7 +9,7 @@
 #   - v4l2loopback modprobe options + autoload (the "GC2607 Virtual Camera" node)
 #   - system-wide WirePlumber rules (hide raw IPU6/libcamera, prefer the vcam)
 pkgname=gc2607-virtual-camera-git
-pkgver=r43.g39ee14f
+pkgver=r44.g8a9ba85
 pkgrel=1
 pkgdesc="GC2607 on-demand virtual webcam (v4l2-relayd) and system camera config"
 arch=('any')
