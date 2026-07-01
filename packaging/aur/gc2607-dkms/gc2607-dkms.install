@@ -1,0 +1,22 @@
+_load_module() {
+  # The gc2607 module autoloads from its ACPI modalias (HID GCTI2607) on a
+  # normal boot once depmod has run. modprobe here brings the sensor up on
+  # first install without a reboot. Harmless if the sensor is absent or the
+  # live module is busy (the DKMS build takes effect on next reload/reboot).
+  depmod -a 2>/dev/null || true
+  modprobe gc2607 2>/dev/null || true
+}
+
+post_install() {
+  _load_module
+  cat <<'EOF'
+==> gc2607 sensor module built and installed via DKMS.
+    The full camera stack also needs:
+      gc2607-ipu-bridge-dkms, gc2607-ipu6-drivers-dkms,
+      gc2607-ipu6-camera-hal, gc2607-virtual-camera
+EOF
+}
+
+post_upgrade() {
+  _load_module
+}

@@ -1,0 +1,46 @@
+# Maintainer: Alexander Daichendt <claude@daichendt.one>
+#
+# DKMS package for the GC2607 V4L2 sensor module (binds to ACPI HID GCTI2607
+# and registers the v4l2_subdev the IPU6 stack captures from). Rebuilt
+# automatically on every kernel upgrade by the dkms pacman hook.
+
+_pkgbase=gc2607
+pkgname=gc2607-dkms-git
+pkgver=0.3.1.r41.g1471d20
+pkgrel=1
+pkgdesc="GalaxyCore GC2607 V4L2 sensor kernel module (DKMS)"
+arch=('x86_64')
+url="https://github.com/AlexDaichendt/gc2607-camera-linux"
+license=('GPL2')
+depends=('dkms')
+makedepends=('git')
+provides=("${_pkgbase}-dkms=${pkgver}")
+conflicts=("${_pkgbase}-dkms")
+install=gc2607-dkms.install
+source=("git+https://github.com/AlexDaichendt/gc2607-camera-linux.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${srcdir}/gc2607-camera-linux"
+  # PACKAGE_VERSION from dkms.conf, then rNN commits + short hash of HEAD.
+  printf '%s.r%s.g%s' \
+    "$(sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' gc2607-kernel/dkms.conf)" \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short HEAD)"
+}
+
+package() {
+  cd "${srcdir}/gc2607-camera-linux"
+  local dest="${pkgdir}/usr/src/${_pkgbase}-${pkgver}"
+
+  # Module source + Makefile + dkms.conf go to /usr/src; the dkms alpm hook
+  # (shipped by the dkms package) does dkms add/build/install from here on
+  # install and on every kernel upgrade.
+  install -dm755 "${dest}"
+  install -m644 gc2607-kernel/gc2607.c gc2607-kernel/Makefile "${dest}/"
+
+  # The directory under /usr/src is named with the full VCS pkgver, so the
+  # PACKAGE_VERSION in dkms.conf must match or `dkms add` won't find the tree.
+  sed "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"${pkgver}\"/" \
+    gc2607-kernel/dkms.conf > "${dest}/dkms.conf"
+}

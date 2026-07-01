@@ -1,0 +1,42 @@
+# Maintainer: Alexander Daichendt <claude@daichendt.one>
+#
+# DKMS package for a patched ipu-bridge.ko that adds the GC2607 sensor ACPI HID
+# (GCTI2607) and the MateBook upside-down-mount DMI quirk. The distro
+# ipu-bridge module lacks this entry, so the camera graph is never built; this
+# replacement installs to updates/dkms so depmod prefers it over the kernel
+# copy, and is rebuilt automatically on every kernel upgrade.
+
+_pkgbase=ipu-bridge-gc2607
+pkgname=gc2607-ipu-bridge-dkms-git
+pkgver=0.1.0.r41.g1471d20
+pkgrel=1
+pkgdesc="Intel IPU bridge with GC2607 (GCTI2607) sensor-table entry (DKMS)"
+arch=('x86_64')
+url="https://github.com/AlexDaichendt/gc2607-camera-linux"
+license=('GPL2')
+depends=('dkms')
+makedepends=('git')
+provides=("gc2607-ipu-bridge-dkms=${pkgver}" "${_pkgbase}-dkms=${pkgver}")
+conflicts=('gc2607-ipu-bridge-dkms' "${_pkgbase}-dkms")
+install=gc2607-ipu-bridge-dkms.install
+source=("git+https://github.com/AlexDaichendt/gc2607-camera-linux.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${srcdir}/gc2607-camera-linux"
+  printf '%s.r%s.g%s' \
+    "$(sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' ipu-bridge-gc2607/dkms.conf)" \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short HEAD)"
+}
+
+package() {
+  cd "${srcdir}/gc2607-camera-linux"
+  local dest="${pkgdir}/usr/src/${_pkgbase}-${pkgver}"
+
+  install -dm755 "${dest}"
+  install -m644 ipu-bridge-gc2607/ipu-bridge.c ipu-bridge-gc2607/Makefile "${dest}/"
+
+  sed "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"${pkgver}\"/" \
+    ipu-bridge-gc2607/dkms.conf > "${dest}/dkms.conf"
+}

@@ -1,0 +1,84 @@
+# Maintainer: Alexander Daichendt <claude@daichendt.one>
+#
+# Intel IPU6 camera HAL (libcamhal) patched for the GalaxyCore GC2607 and
+# shipped with the GC2607 AIQB + graph tuning assets. Installs to /usr so
+# ld.so, pkg-config and GStreamer discover it automatically; icamerasrc builds
+# against this. Provides/replaces the stock ipu6-camera-hal package.
+#
+# Upstream HAL is pinned to the commit this repo validates as a submodule; the
+# three patches + the tuning assets come from gc2607-camera-linux at HEAD.
+
+_pkgbase=ipu6-camera-hal
+# Pinned to third_party/ipu6-camera-hal in AlexDaichendt/gc2607-camera-linux.
+_hal_commit=9899efa70921906ee6dd23c9f83aff343968f164
+pkgname=gc2607-ipu6-camera-hal-git
+pkgver=r41.g1471d20
+pkgrel=1
+pkgdesc="Intel IPU6 camera HAL (libcamhal) patched for the GalaxyCore GC2607"
+arch=('x86_64')
+url="https://github.com/AlexDaichendt/gc2607-camera-linux"
+license=('Apache')
+# intel-ipu6-camera-bin (AUR) ships the proprietary libia/libipu6 userspace
+# libraries the HAL links against, and transitively pulls intel-ipu6-dkms-git
+# (the out-of-tree PSYS module -> /dev/ipu-psys0). The rest are HAL libs.
+depends=('intel-ipu6-camera-bin' 'expat' 'libdrm' 'gcc-libs')
+makedepends=('git' 'cmake' 'ninja' 'pkgconf')
+provides=("gc2607-ipu6-camera-hal=${pkgver}" "${_pkgbase}=${pkgver}" 'libcamhal')
+conflicts=('gc2607-ipu6-camera-hal' "${_pkgbase}")
+source=(
+  "git+https://github.com/AlexDaichendt/gc2607-camera-linux.git"
+  "${_pkgbase}::git+https://github.com/intel/ipu6-camera-hal.git#commit=${_hal_commit}"
+)
+sha256sums=('SKIP' 'SKIP')
+
+pkgver() {
+  cd "${srcdir}/gc2607-camera-linux"
+  printf 'r%s.g%s' \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  local bringup="${srcdir}/gc2607-camera-linux"
+  cd "${srcdir}/${_pkgbase}"
+
+  # GC2607 HAL patches: sensor profile + PSYS padding, GC2607 sensor XML, and a
+  # Werror relaxation for newer toolchains.
+  local p
+  for p in "${bringup}"/patches/hal/*.patch; do
+    git apply "${p}"
+  done
+
+  # Drop the GC2607 tuning assets into the HAL config tree (mirrors
+  # scripts/install-hal-assets.sh).
+  install -Dm644 "${bringup}/assets/hal/gc2607_gc2607_MTL.aiqb" \
+    config/linux/ipu6epmtl/gc2607_gc2607_MTL.aiqb
+  install -Dm644 "${bringup}/assets/hal/graph_settings_gc2607_gc2607_MTL.xml" \
+    config/linux/ipu6epmtl/gcss/graph_settings_gc2607_gc2607_MTL.xml
+  install -Dm644 "${bringup}/assets/hal/graph_descriptor.xml" \
+    config/linux/ipu6epmtl/gcss/graph_descriptor.xml
+}
+
+build() {
+  cd "${srcdir}/${_pkgbase}"
+  # -DIPU_VER=ipu6epmtl selects the Meteor Lake target; without it the library
+  # targets inside the HAL's foreach(IPU_VER ...) loop are never created and the
+  # build produces nothing. CAMHAL_PLUGIN/ADAPTOR produce the plugins dir and
+  # the libcamhal.so adaptor the runtime expects. POLICY_VERSION_MINIMUM lets
+  # the HAL's old cmake_minimum_required pass on CMake 4.x.
+  cmake -S . -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=lib \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+    -DIPU_VER=ipu6epmtl \
+    -DUSE_PG_LITE_PIPE=ON \
+    -DBUILD_CAMHAL_PLUGIN=ON \
+    -DBUILD_CAMHAL_ADAPTOR=ON
+  cmake --build build -j"$(nproc)"
+}
+
+package() {
+  cd "${srcdir}/${_pkgbase}"
+  DESTDIR="${pkgdir}" cmake --install build
+}

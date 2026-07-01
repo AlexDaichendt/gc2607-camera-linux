@@ -1,0 +1,26 @@
+_note() {
+  cat <<'EOF'
+==> Patched ipu-bridge built and installed via DKMS (overrides the kernel copy).
+    It replaces an in-use module, so it takes effect after a reboot, or after
+    reloading the IPU6 stack with all camera users closed:
+
+      sudo modprobe -r gc2607 intel_ipu6_isys intel_ipu6_psys intel_ipu6 ipu_bridge
+      sudo modprobe gc2607
+
+EOF
+}
+
+post_install() {
+  depmod -a 2>/dev/null || true
+  _note
+}
+
+post_upgrade() {
+  depmod -a 2>/dev/null || true
+  _note
+}
+
+post_remove() {
+  # Drop back to the in-kernel ipu-bridge on next reload.
+  depmod -a 2>/dev/null || true
+}

@@ -1,0 +1,79 @@
+# Maintainer: Alexander Daichendt <claude@daichendt.one>
+#
+# Top of the GC2607 camera stack: the on-demand virtual webcam integration plus
+# system config that ties everything together. Depends on the rest of the
+# stack, so installing this (with an AUR helper) pulls the whole chain.
+#
+# Ships:
+#   - /etc/v4l2-relayd.d/gc2607.conf      relayd instance (icamerasrc -> loopback)
+#   - v4l2loopback modprobe options + autoload (the "GC2607 Virtual Camera" node)
+#   - PSYS modules-load + /dev/ipu-psys0 udev permissions
+#   - system-wide WirePlumber rules (hide raw IPU6/libcamera, prefer the vcam)
+# and enables v4l2-relayd.service so the camera survives reboots.
+
+pkgname=gc2607-virtual-camera-git
+pkgver=r41.g1471d20
+pkgrel=1
+pkgdesc="GC2607 on-demand virtual webcam (v4l2-relayd) and system camera config"
+arch=('any')
+url="https://github.com/AlexDaichendt/gc2607-camera-linux"
+license=('GPL2')
+depends=(
+  'gc2607-dkms'
+  'gc2607-ipu-bridge-dkms'
+  'gc2607-ipu6-camera-hal'
+  # PSYS (/dev/ipu-psys0) — the out-of-tree intel-ipu6-psys module. Also pulled
+  # transitively by gc2607-ipu6-camera-hal -> intel-ipu6-camera-bin; listed here
+  # because the relayd pipeline needs the device at runtime.
+  'intel-ipu6-dkms-git'
+  'icamerasrc-git'
+  'v4l2-relayd'
+  'v4l2loopback-dkms'
+  'gstreamer'
+  'gst-plugins-base'
+  'gst-plugins-good'
+)
+makedepends=('git')
+provides=('gc2607-virtual-camera')
+conflicts=('gc2607-virtual-camera')
+install=gc2607-virtual-camera.install
+backup=('etc/v4l2-relayd.d/gc2607.conf')
+source=("git+https://github.com/AlexDaichendt/gc2607-camera-linux.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${srcdir}/gc2607-camera-linux"
+  printf 'r%s.g%s' \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short HEAD)"
+}
+
+package() {
+  cd "${srcdir}/gc2607-camera-linux"
+
+  # relayd instance config. Must live in /etc/v4l2-relayd.d so the v4l2-relayd
+  # systemd generator picks it up and creates v4l2-relayd@gc2607. Marked as a
+  # backup file so local pipeline tweaks survive upgrades.
+  install -Dm644 config/v4l2-relayd.conf \
+    "${pkgdir}/etc/v4l2-relayd.d/gc2607.conf"
+
+  # v4l2loopback: autoload at boot + the GC2607-labelled device options.
+  install -Dm644 config/modprobe.d/gc2607-v4l2loopback.conf \
+    "${pkgdir}/usr/lib/modprobe.d/gc2607-v4l2loopback.conf"
+  install -Dm644 /dev/stdin \
+    "${pkgdir}/usr/lib/modules-load.d/gc2607-v4l2loopback.conf" <<'EOF'
+# Auto-load the v4l2loopback module at boot for the GC2607 virtual camera.
+v4l2loopback
+EOF
+
+  # IPU6 PSYS: force-load at boot + group/permissions on /dev/ipu-psys0.
+  install -Dm644 config/modules-load.d/intel-ipu6-psys.conf \
+    "${pkgdir}/usr/lib/modules-load.d/intel-ipu6-psys.conf"
+  install -Dm644 config/udev/rules.d/70-ipu6-psys.rules \
+    "${pkgdir}/usr/lib/udev/rules.d/70-ipu6-psys.rules"
+
+  # Desktop integration, system-wide (per-user equivalent:
+  # scripts/install-virtual-camera-desktop.sh).
+  install -Dm644 config/wireplumber/50-gc2607-virtual-camera.conf \
+    "${pkgdir}/usr/share/wireplumber/wireplumber.conf.d/50-gc2607-virtual-camera.conf"
+}

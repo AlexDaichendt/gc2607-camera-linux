@@ -1,0 +1,11 @@
+# makepkg build dirs
+src/
+pkg/
+# VCS source checkouts makepkg clones in
+gc2607-camera-linux/
+ipu6-camera-hal/
+ipu6-drivers/
+# built packages
+*.pkg.tar.zst
+*.pkg.tar.*
+# srcinfo is generated; commit it per-package only when publishing to the AUR

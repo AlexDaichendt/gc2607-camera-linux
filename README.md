@@ -107,6 +107,61 @@ HAL output: NV12 1920x1080 @ 30 fps
 
 The tested system exposes the sensor as `i2c-GCTI2607:00`.
 
+## Install
+
+There are two ways to install the stack. The **AUR packages are the recommended
+path on Arch/CachyOS** — they rebuild the kernel modules automatically on every
+kernel upgrade (an out-of-tree module installed by hand is silently lost on the
+next kernel bump). The manual from-source path further down is for development
+or non-Arch systems.
+
+### Arch Linux / AUR packages (recommended)
+
+Four packages mirror the stages of the bring-up; see
+[`packaging/aur/`](packaging/aur/) for the full table and details.
+
+A couple of dependencies live on the AUR and must be installed first (raw
+`makepkg` does not fetch AUR deps; an AUR helper does):
+
+```sh
+paru -S intel-ipu6-camera-bin icamerasrc-git
+```
+
+Then build the stack in dependency order:
+
+```sh
+git clone https://github.com/AlexDaichendt/gc2607-camera-linux.git
+cd gc2607-camera-linux/packaging/aur
+
+(cd gc2607-dkms              && makepkg -si)
+(cd gc2607-ipu-bridge-dkms   && makepkg -si)
+(cd gc2607-ipu6-camera-hal   && makepkg -si)
+(cd gc2607-virtual-camera    && makepkg -si)
+
+# Reboot for a clean first bring-up (the DKMS packages replace in-use kernel
+# modules), then pick "GC2607 Virtual Camera" in your app.
+reboot
+```
+
+The final `gc2607-virtual-camera` package enables `v4l2-relayd.service` and
+brings up the virtual webcam, so after the reboot the whole stack comes up on
+boot with no further steps. Removal is the reverse `pacman -R` (see
+`packaging/aur/README.md`).
+
+If you previously installed via the manual `scripts/install-*.sh` path, back it
+out first so the packages take over cleanly:
+
+```sh
+sudo ./scripts/uninstall.sh
+```
+
+### Manual / from-source build
+
+The sections below (Required Sources through Use As An On-Demand Virtual Webcam)
+build and install everything by hand with the `scripts/install-*.sh` helpers.
+Use this for development, to inspect each step, or on non-Arch systems. The
+packaged path above wraps exactly these steps.
+
 ## Repo Layout
 
 ```text
@@ -114,12 +169,17 @@ assets/hal/       GC2607 AIQB and graph XML used by the HAL pipeline
 config/           boot-time module and udev configuration
 docs/             asset checksums, raw capture, and troubleshooting notes
 gc2607-kernel/    in-tree GC2607 V4L2 sensor driver source (built via DKMS)
+ipu-bridge-gc2607/
+                  patched ipu-bridge module source (built via DKMS)
+packaging/aur/    Arch Linux / AUR packages for the whole stack (recommended
+                  install path; see packaging/aur/README.md)
 patches/driver/   historical diff for the GC2607 driver, now baked into
                   gc2607-kernel/ (kept for reference only)
 patches/hal/      patches for Intel ipu6-camera-hal
 patches/ipu6-drivers/
                   patch for the older out-of-tree IPU bridge table
-scripts/          clone, patch, install, and validation scripts
+scripts/          clone, patch, install, validation, and uninstall scripts
+                  (uninstall.sh backs out the manual install)
 third_party/      upstream ipu6-camera-hal and ipu6-drivers, tracked as
                   git submodules
 ```

@@ -1,0 +1,44 @@
+_apply() {
+  depmod -a 2>/dev/null || true
+  udevadm control --reload-rules 2>/dev/null || true
+  udevadm trigger -s misc 2>/dev/null || true
+
+  # Bring the loopback up now with the packaged options so /dev/video60 exists
+  # without a reboot. Harmless if already loaded.
+  modprobe v4l2loopback 2>/dev/null || true
+
+  systemctl daemon-reload 2>/dev/null || true
+}
+
+post_install() {
+  _apply
+  # NOTE: enabling a service from a scriptlet deviates from Arch packaging
+  # guidelines (which leave this to the user). Kept for one-shot convenience;
+  # drop these lines if publishing to the AUR. The generator turns the shipped
+  # /etc/v4l2-relayd.d/gc2607.conf into a v4l2-relayd@gc2607 instance, pulled in
+  # by v4l2-relayd.service.
+  systemctl enable --now v4l2-relayd.service 2>/dev/null || true
+  cat <<'EOF'
+==> GC2607 virtual camera installed and v4l2-relayd enabled.
+    "GC2607 Virtual Camera" (/dev/video60) is now selectable in apps; the real
+    sensor only powers on while an app holds the device open.
+
+    The DKMS modules (sensor, ipu-bridge, PSYS) replace in-use kernel modules,
+    so a reboot is recommended for a clean first bring-up. After that the whole
+    stack comes up automatically on boot.
+EOF
+}
+
+post_upgrade() {
+  _apply
+  systemctl try-restart v4l2-relayd.service 2>/dev/null || true
+}
+
+pre_remove() {
+  systemctl disable --now v4l2-relayd.service 2>/dev/null || true
+}
+
+post_remove() {
+  depmod -a 2>/dev/null || true
+  udevadm control --reload-rules 2>/dev/null || true
+}
