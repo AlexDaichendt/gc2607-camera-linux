@@ -54,8 +54,11 @@ Stop the engine when done:
 
 The `prepare` step loads `v4l2loopback` and registers PipeWire visibility; it does not start relayd.
 The `start` step launches relayd as a `systemd --user` service. While no app has the virtual camera
-open, relayd feeds the splash image (a cheap black `videotestsrc`) so the node stays discoverable
-under `exclusive_caps=1`. The instant an app opens `GC2607 Virtual Camera`, relayd starts the real
+open, relayd feeds the splash image (a two-frame black `videotestsrc` burst, then EOS) so the node
+stays discoverable under `exclusive_caps=1`. The splash is deliberately one-shot: a live splash
+source would keep pumping frames into relayd's output queue while no reader is attached, burning
+CPU and growing RSS for nobody (see issue #10). The instant an app opens
+`GC2607 Virtual Camera`, relayd starts the real
 `icamerasrc` pipeline; when the last consumer closes, it returns to the splash and powers the sensor
 back down. There is no idle-timeout knob any more — start/stop is driven directly by the kernel
 open/close events.
