@@ -81,7 +81,13 @@ OUTPUT_PIPELINE+=" ! videoconvert ! v4l2sink name=v4l2sink device=${DEVICE} sync
 # Splash (-s): the cheap idle image relayd feeds to the loopback when no real
 # camera is running. This is what keeps the device a valid capture node under
 # exclusive_caps=1 without ever powering the GC2607 sensor.
-SPLASH_PIPELINE="${GC2607_VCAM_SPLASHSRC:-videotestsrc is-live=true pattern=black ! capsfilter caps=${OUTPUT_CAPS}}"
+#
+# One-shot burst, not a live source: with no capture reader attached the
+# loopback never recycles v4l2sink buffers, so a live splash would keep
+# pumping frames into relayd's unbounded appsrc queue — idle CPU and RSS
+# growth for nobody (issue #10). Two black frames then EOS is enough to make
+# the node discoverable.
+SPLASH_PIPELINE="${GC2607_VCAM_SPLASHSRC:-videotestsrc num-buffers=2 pattern=black ! capsfilter caps=${OUTPUT_CAPS}}"
 
 RELAYD_ARGS=(-i "$INPUT_PIPELINE" -o "$OUTPUT_PIPELINE" -s "$SPLASH_PIPELINE")
 if [[ -n "${GC2607_RELAYD_DEBUG:-}" ]]; then
